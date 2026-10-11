@@ -9,6 +9,10 @@
 // to hold that port while headroom is closed; the first connection makes launchd start this
 // program with --launchd, and the listening sockets are handed to the server, which answers the
 // browser that is already waiting. Nothing runs until then.
+//
+// Plain headroom.localhost (port 80) works too: a second agent holds port 80 and starts this
+// program with --door, which only redirects by name (headroom.localhost → :8460, harbor.localhost
+// → :8470) and exits when idle. harbor carries the same door, so either app can serve it.
 import AppKit
 
 let label = "local.headroom.door"
@@ -158,6 +162,7 @@ enum Door {
         if program.contains("/AppTranslocation/") || program.hasPrefix("/Volumes/") {
             return false
         }
+        PortDoor.install(program: program)
         let wanted: [String: Any] = [
             "Label": label,
             "ProgramArguments": [program, "--launchd"],
@@ -219,7 +224,7 @@ enum Door {
         return all
     }
 
-    private static func launchctl(_ arguments: [String]) -> Bool {
+    static func launchctl(_ arguments: [String]) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         process.arguments = arguments
@@ -232,6 +237,96 @@ enum Door {
         } catch {
             return false
         }
+    }
+}
+
+// The port-80 door: lets plain headroom.localhost and harbor.localhost open their apps.
+enum PortDoor {
+    static let label = "local.localhost.door"
+    static let routes = ["headroom.localhost": 8460, "harbor.localhost": 8470]
+    static var keep: [DispatchSourceProtocol] = []
+
+    // Loads the shared agent unless a working copy is already there (harbor may have set it up).
+    static func install(program: String) {
+        let plist = NSHomeDirectory() + "/Library/LaunchAgents/\(label).plist"
+        if Door.launchctl(["print", "\(Door.domain)/\(label)"]),
+           let current = NSDictionary(contentsOfFile: plist),
+           let owner = (current["ProgramArguments"] as? [String])?.first,
+           FileManager.default.isExecutableFile(atPath: owner) {
+            return
+        }
+        _ = Door.launchctl(["bootout", "\(Door.domain)/\(label)"])
+        let agent: NSDictionary = [
+            "Label": label,
+            "ProgramArguments": [program, "--door"],
+            "Sockets": [
+                "v4": ["SockNodeName": "127.0.0.1", "SockServiceName": "80", "SockFamily": "IPv4"],
+                "v6": ["SockNodeName": "::1", "SockServiceName": "80", "SockFamily": "IPv6"],
+            ],
+        ]
+        if agent.write(toFile: plist, atomically: true) {
+            _ = Door.launchctl(["bootstrap", Door.domain, plist])
+        }
+    }
+
+    // Started by launchd on a connection to port 80: answer every waiting browser with a redirect
+    // by name, then leave once nobody has knocked for ten seconds.
+    static func serve() -> Never {
+        let listeners = Door.sockets()
+        guard !listeners.isEmpty else { exit(1) }
+        var last = Date()
+        for listener in listeners {
+            let source = DispatchSource.makeReadSource(fileDescriptor: listener, queue: .main)
+            source.setEventHandler {
+                let client = accept(listener, nil, nil)
+                guard client >= 0 else { return }
+                last = Date()
+                answer(client)
+            }
+            source.resume()
+            keep.append(source)
+        }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 2, repeating: 2)
+        timer.setEventHandler {
+            if Date().timeIntervalSince(last) > 10 { exit(0) }
+        }
+        timer.resume()
+        keep.append(timer)
+        dispatchMain()
+    }
+
+    private static func answer(_ client: Int32) {
+        var wait = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &wait, socklen_t(MemoryLayout<timeval>.size))
+        var head = [UInt8]()
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        while head.count < 16384 {
+            let got = read(client, &chunk, chunk.count)
+            if got <= 0 { break }
+            head += chunk[0..<got]
+            if String(decoding: head, as: UTF8.self).contains("\r\n\r\n") { break }
+        }
+        var host = ""
+        for line in String(decoding: head, as: UTF8.self).components(separatedBy: "\r\n")
+        where line.lowercased().hasPrefix("host:") {
+            host = line.dropFirst(5).trimmingCharacters(in: .whitespaces).lowercased()
+            if let colon = host.lastIndex(of: ":"), !host.hasSuffix("]") {
+                host = String(host[..<colon])
+            }
+        }
+        let reply: String
+        if let port = routes[host] {
+            // 302, never 301: browsers keep a 301 forever, and the port may change one day.
+            reply = "HTTP/1.1 302 Found\r\nLocation: http://\(host):\(port)/\r\nCache-Control: no-store\r\n"
+                + "Content-Length: 0\r\nConnection: close\r\n\r\n"
+        } else {
+            let body = "Nothing lives here. Try headroom.localhost or harbor.localhost.\n"
+            reply = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\n"
+                + "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n" + body
+        }
+        _ = reply.withCString { write(client, $0, strlen($0)) }
+        close(client)
     }
 }
 
@@ -262,6 +357,10 @@ enum Spawn {
         var pid: pid_t = 0
         return posix_spawn(&pid, program, &actions, &attributes, argv, envp) == 0 ? pid : nil
     }
+}
+
+if CommandLine.arguments.contains("--door") {
+    PortDoor.serve()      // no Dock icon, no app: just the redirect
 }
 
 let app = NSApplication.shared
