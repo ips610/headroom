@@ -14,6 +14,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -553,9 +554,9 @@ try:
     host = f"headroom.localhost:{port}"
     cookie = f"headroom={cleaner.TOKEN}"
 
-    def call(path, body=None, cookie=cookie, host=host, run=cleaner.RUN, address="127.0.0.1", raw=None):
+    def call(path, body=None, cookie=cookie, host=host, run=cleaner.RUN, address="127.0.0.1", raw=None, extra=None):
         connection = http.client.HTTPConnection(address, port, timeout=30)
-        headers = {"Host": host}
+        headers = {"Host": host, **(extra or {})}
         if cookie:
             headers["Cookie"] = cookie
         if run:
@@ -579,6 +580,15 @@ try:
     assert status == 200 and cleaner.RUN.encode() in page and b"__RUN__" not in page
     assert call("/favicon.svg", cookie=None, run=None)[1].startswith(b"<svg")
     assert call("/", host="evil.example:80", cookie=None, run=None)[0] == 403, "DNS rebinding gets nothing"
+    # Typing headroom.localhost into the address bar (or a bookmark) opens a session; a link or
+    # redirect from another site gets the page, which says to open headroom from Applications.
+    status, page, reply = call("/", cookie=None, run=None, extra={"Sec-Fetch-Site": "none"})
+    assert status == 200 and reply.getheader("Set-Cookie") == cleaner.COOKIE and b"headroom-run" in page
+    for site in ("cross-site", "same-site", "same-origin", None):
+        status, _, reply = call("/", cookie=None, run=None, extra={"Sec-Fetch-Site": site} if site else None)
+        assert status == 200 and reply.getheader("Set-Cookie") is None, site
+    assert call("/", cookie=None, run=None, extra={"Sec-Fetch-Site": "none"}, host="evil.example:80")[0] == 403
+    assert call("/", run=None, extra={"Sec-Fetch-Site": "none"})[2].getheader("Set-Cookie") is None, "already in"
     assert call("/api/start")[0] == 200
     assert call("/api/start", host=f"127.0.0.1:{port}")[0] == 200
     assert call("/api/start", host=f"[::1]:{port}", address="::1")[0] == 200, "the ::1 listener answers"
@@ -672,6 +682,57 @@ try:
     for server in (v4, v6):
         server.shutdown()
         server.server_close()
+
+    # --- sockets launchd holds and hands over --------------------------------------
+    held = [socket.socket(socket.AF_INET), socket.socket(socket.AF_INET6)]
+    held[0].bind(("127.0.0.1", 0))
+    held[1].bind(("::1", held[0].getsockname()[1]))
+    for sock in held:
+        sock.listen(16)
+    port = held[0].getsockname()[1]
+    os.environ["HEADROOM_LISTEN_FDS"] = f"{held[0].fileno()},{held[1].fileno()}"
+    try:
+        servers = cleaner.inherited()
+    finally:
+        del os.environ["HEADROOM_LISTEN_FDS"]
+    assert [s.server_port for s in servers] == [port, port]
+    assert [s.address_family for s in servers] == [socket.AF_INET, socket.AF_INET6]
+    for server in servers:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    for address, name in (("127.0.0.1", f"127.0.0.1:{port}"), ("::1", f"headroom.localhost:{port}")):
+        connection = http.client.HTTPConnection(address, port, timeout=30)
+        connection.request("GET", "/favicon.svg", headers={"Host": name})
+        assert connection.getresponse().status == 200, address
+        connection.close()
+    for server in servers:
+        server.shutdown()
+    assert cleaner.inherited() is None, "without the variable, headroom binds its own"
+
+    # The whole server started the way the launcher starts it: handed sockets, told not to open
+    # a browser. It names the address on its first line and answers on both sockets.
+    held = [socket.socket(socket.AF_INET), socket.socket(socket.AF_INET6)]
+    held[0].bind(("127.0.0.1", 0))
+    held[1].bind(("::1", held[0].getsockname()[1]))
+    for sock in held:
+        sock.listen(16)
+    port = held[0].getsockname()[1]
+    fds = [sock.fileno() for sock in held]
+    child = subprocess.Popen([sys.executable, cleaner.__file__, "--no-open"], stdout=subprocess.PIPE, text=True,
+                             pass_fds=fds, env={**os.environ, "HEADROOM_LISTEN_FDS": ",".join(map(str, fds))})
+    try:
+        line = child.stdout.readline()
+        assert re.match(rf"^headroom is open at http://headroom\.localhost:{port}/\?k=[\w-]+$", line.strip()), line
+        for sock in held:
+            sock.close()                    # only the child holds them now
+        for address in ("127.0.0.1", "::1"):
+            connection = http.client.HTTPConnection(address, port, timeout=30)
+            connection.request("GET", "/" + line.strip().split("/", 3)[3], headers={"Host": f"headroom.localhost:{port}"})
+            reply = connection.getresponse()
+            assert reply.status == 303 and reply.getheader("Set-Cookie", "").startswith("headroom="), address
+            connection.close()
+    finally:
+        child.terminate()
+        child.wait(10)
     print("ok")
 finally:
     listener.close()

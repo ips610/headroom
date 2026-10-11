@@ -4,43 +4,39 @@
 // reads the page's address from the server's first line, and opens that page again whenever the
 // Dock icon is clicked. Quitting the app stops the server; the server stopping on its own (the
 // tab was closed) quits the app, so the Dock icon is there exactly while headroom is running.
+//
+// Typing headroom.localhost:8460 into a browser also opens headroom. A LaunchAgent asks launchd
+// to hold that port while headroom is closed; the first connection makes launchd start this
+// program with --launchd, and the listening sockets are handed to the server, which answers the
+// browser that is already waiting. Nothing runs until then.
 import AppKit
 
+let label = "local.headroom.door"
+let port = "8460"
+
+@_silgen_name("launch_activate_socket")
+func launch_activate_socket(_ name: UnsafePointer<CChar>,
+                            _ fds: UnsafeMutablePointer<UnsafeMutablePointer<Int32>?>,
+                            _ count: UnsafeMutablePointer<Int>) -> Int32
+
 final class Shell: NSObject, NSApplicationDelegate {
-    private var server: Process?
+    private var server: pid_t = 0
+    private var exitWatch: DispatchSourceProcess?
+    private var reader: FileHandle?     // kept, or the pipe closes and the server's first line fails
     private var page: URL?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = mainMenu()
-        guard let (program, arguments) = serverCommand() else {
+        let byLaunchd = CommandLine.arguments.contains("--launchd")
+        if !byLaunchd, Door.install(), Door.handOver() {
+            // launchd now starts the copy that owns the port; it opens the page.
+            return NSApp.terminate(nil)
+        }
+        let sockets = byLaunchd ? Door.sockets() : []
+        // Started by a browser connection: that tab is already waiting, so don't open another.
+        let openTab = !byLaunchd || Door.takePageRequest()
+        guard start(sockets: sockets, openTab: openTab) else {
             return fail("headroom needs Python 3. Install it with: brew install python")
-        }
-        let process = Process()
-        process.executableURL = program
-        process.arguments = arguments
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = log()
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else {
-                handle.readabilityHandler = nil
-                return
-            }
-            // The server's first line is "headroom is open at <address>".
-            if let found = text.range(of: #"(?<=open at )http://\S+"#, options: .regularExpression) {
-                let address = URL(string: String(text[found]))
-                DispatchQueue.main.async { self?.page = address }
-            }
-        }
-        process.terminationHandler = { _ in
-            DispatchQueue.main.async { NSApp.terminate(nil) }
-        }
-        do {
-            try process.run()
-            server = process
-        } catch {
-            fail("headroom could not start: \(error.localizedDescription)")
         }
     }
 
@@ -57,8 +53,8 @@ final class Shell: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if let server, server.isRunning {
-            server.terminate()
+        if server > 0 {
+            kill(server, SIGTERM)
         }
     }
 
@@ -68,13 +64,54 @@ final class Shell: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func start(sockets: [Int32], openTab: Bool) -> Bool {
+        guard let (program, arguments) = serverCommand() else { return false }
+        var output: [Int32] = [0, 0]
+        guard pipe(&output) == 0 else { return false }
+        let log = open(NSHomeDirectory() + "/Library/Logs/headroom.log", O_WRONLY | O_CREAT | O_TRUNC, 0o600)
+        var environment = ProcessInfo.processInfo.environment
+        if !sockets.isEmpty {
+            environment["HEADROOM_LISTEN_FDS"] = sockets.indices.map { String(3 + $0) }.joined(separator: ",")
+        }
+        let pid = Spawn.run(program, arguments + (openTab ? [] : ["--no-open"]), environment: environment,
+                            stdout: output[1], stderr: log >= 0 ? log : 2, extra: sockets)
+        close(output[1])
+        if log >= 0 { close(log) }
+        guard let pid else { return false }
+        server = pid
+        let reader = FileHandle(fileDescriptor: output[0], closeOnDealloc: true)
+        self.reader = reader
+        reader.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else {
+                handle.readabilityHandler = nil
+                return
+            }
+            // The server's first line is "headroom is open at <address>".
+            if let found = text.range(of: #"(?<=open at )http://\S+"#, options: .regularExpression) {
+                let address = URL(string: String(text[found]))
+                DispatchQueue.main.async { self?.page = address }
+            }
+        }
+        let watch = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
+        watch.setEventHandler { [weak self] in
+            var status: Int32 = 0
+            waitpid(pid, &status, 0)
+            self?.server = 0
+            NSApp.terminate(nil)
+        }
+        watch.resume()
+        exitWatch = watch
+        return true
+    }
+
     // The packaged app carries a frozen server beside this program; a source install runs
     // cleaner.py from Resources with the first real Python it finds. /usr/bin/python3 comes last:
     // it is an Xcode shim that can stall for minutes.
-    private func serverCommand() -> (URL, [String])? {
+    private func serverCommand() -> (String, [String])? {
         let bundle = Bundle.main
-        let frozen = bundle.bundleURL.appendingPathComponent("Contents/MacOS/headroom")
-        if FileManager.default.isExecutableFile(atPath: frozen.path) {
+        let frozen = bundle.bundleURL.appendingPathComponent("Contents/MacOS/headroom").path
+        if FileManager.default.isExecutableFile(atPath: frozen) {
             return (frozen, ["--serve"])
         }
         guard let script = bundle.url(forResource: "cleaner", withExtension: "py") else { return nil }
@@ -85,13 +122,7 @@ final class Shell: NSObject, NSApplicationDelegate {
         guard let python = pythons.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             return nil
         }
-        return (URL(fileURLWithPath: python), [script.path])
-    }
-
-    private func log() -> FileHandle {
-        let path = NSHomeDirectory() + "/Library/Logs/headroom.log"
-        FileManager.default.createFile(atPath: path, contents: nil)
-        return FileHandle(forWritingAtPath: path) ?? FileHandle.nullDevice
+        return (python, [script.path])
     }
 
     private func mainMenu() -> NSMenu {
@@ -111,6 +142,125 @@ final class Shell: NSObject, NSApplicationDelegate {
         alert.messageText = message
         alert.runModal()
         NSApp.terminate(nil)
+    }
+}
+
+// The LaunchAgent that keeps headroom.localhost:8460 answerable while headroom is closed.
+enum Door {
+    static let plist = NSHomeDirectory() + "/Library/LaunchAgents/\(label).plist"
+    static let request = NSHomeDirectory() + "/Library/Application Support/headroom/open-page"
+    static var domain: String { "gui/\(getuid())" }
+
+    // Writes and loads the agent for wherever this app now lives. Skipped for copies macOS runs
+    // from a temporary place (App Translocation, a mounted disk image), whose path will not last.
+    static func install() -> Bool {
+        let program = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        if program.contains("/AppTranslocation/") || program.hasPrefix("/Volumes/") {
+            return false
+        }
+        let wanted: [String: Any] = [
+            "Label": label,
+            "ProgramArguments": [program, "--launchd"],
+            "ProcessType": "Interactive",
+            "Sockets": [
+                "v4": ["SockNodeName": "127.0.0.1", "SockServiceName": port, "SockFamily": "IPv4"],
+                "v6": ["SockNodeName": "::1", "SockServiceName": port, "SockFamily": "IPv6"],
+            ],
+        ]
+        let current = NSDictionary(contentsOfFile: plist) as? [String: Any]
+        let loaded = launchctl(["print", "\(domain)/\(label)"])
+        if loaded, let current, NSDictionary(dictionary: current).isEqual(to: wanted) {
+            return true
+        }
+        if loaded {
+            _ = launchctl(["bootout", "\(domain)/\(label)"])
+        }
+        try? FileManager.default.createDirectory(atPath: (plist as NSString).deletingLastPathComponent,
+                                                 withIntermediateDirectories: true)
+        guard (wanted as NSDictionary).write(toFile: plist, atomically: true) else { return false }
+        return launchctl(["bootstrap", domain, plist])
+    }
+
+    // Opened from Finder or Spotlight: ask launchd to start the copy that owns the port, and tell
+    // it to open the page.
+    static func handOver() -> Bool {
+        try? FileManager.default.createDirectory(atPath: (request as NSString).deletingLastPathComponent,
+                                                 withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: request, contents: nil)
+        if launchctl(["kickstart", "\(domain)/\(label)"]) {
+            return true
+        }
+        try? FileManager.default.removeItem(atPath: request)
+        return false
+    }
+
+    // True when the copy that opened the app asked for the page in the last half minute.
+    static func takePageRequest() -> Bool {
+        guard let made = (try? FileManager.default.attributesOfItem(atPath: request))?[.modificationDate] as? Date
+        else { return false }
+        try? FileManager.default.removeItem(atPath: request)
+        return Date().timeIntervalSince(made) < 30
+    }
+
+    // The listening sockets launchd holds for us, moved above 10 so they can be placed at 3, 4.
+    static func sockets() -> [Int32] {
+        var all: [Int32] = []
+        for name in ["v4", "v6"] {
+            var fds: UnsafeMutablePointer<Int32>?
+            var count = 0
+            guard launch_activate_socket(name, &fds, &count) == 0, let fds else { continue }
+            for index in 0..<count {
+                let moved = fcntl(fds[index], F_DUPFD_CLOEXEC, 10)
+                if moved >= 0 { all.append(moved) }
+                close(fds[index])
+            }
+            free(fds)
+        }
+        return all
+    }
+
+    private static func launchctl(_ arguments: [String]) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+}
+
+// posix_spawn, so the listening sockets can be handed to the server at fixed numbers (3, 4, …)
+// and everything else stays closed.
+enum Spawn {
+    static func run(_ program: String, _ arguments: [String], environment: [String: String],
+                    stdout: Int32, stderr: Int32, extra: [Int32]) -> pid_t? {
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_adddup2(&actions, stdout, 1)
+        posix_spawn_file_actions_adddup2(&actions, stderr, 2)
+        for (index, fd) in extra.enumerated() {
+            posix_spawn_file_actions_adddup2(&actions, fd, Int32(3 + index))
+        }
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT))
+        let argv = ([program] + arguments).map { strdup($0) } + [nil]
+        let envp = environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        defer {
+            argv.forEach { free($0) }
+            envp.forEach { free($0) }
+        }
+        var pid: pid_t = 0
+        return posix_spawn(&pid, program, &actions, &attributes, argv, envp) == 0 ? pid : nil
     }
 }
 
