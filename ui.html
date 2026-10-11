@@ -5,13 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <meta name="headroom-run" content="__RUN__">
+<script>
+  // The look picked last time (Auto, Light or Dark), set before anything is drawn. Auto when unknown.
+  try { var look = localStorage.getItem('headroom-theme'); if (look === 'light' || look === 'dark') document.documentElement.dataset.theme = look; } catch (error) {}
+</script>
 <title>headroom</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
   /* Editorial look: an ink hero with a big number and a tick meter, then a white list
      of sections as an accordion, and a dark pill that floats at the bottom. */
+  /* Light by default; dark when the Mac is dark (unless Light was picked) or when Dark was picked. */
   :root {
-    color-scheme: light dark;
+    color-scheme: light;
     --ink: #0a0a0a;
     --on-dark: #f3f4f1;
     --on-dark-2: #a9ada7;
@@ -52,7 +57,8 @@
     --ease: cubic-bezier(.2, .7, .1, 1);
   }
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
       --bg: #0e0f0e;
       --panel: #161816;
       --line: #262826;
@@ -68,6 +74,23 @@
       --danger: #e0533f;
       --focus: #7be0a8;
     }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0e0f0e;
+    --panel: #161816;
+    --line: #262826;
+    --text: #f3f4f1;
+    --text-2: #c9ccc6;
+    --muted: #a9ada7;
+    --muted-2: #7d817c;
+    --accent: #7be0a8;
+    --accent-soft: rgba(123, 224, 168, .1);
+    --bar: #5fbf8e;
+    --warn: #f0a75a;
+    --warn-line: #8a5a2b;
+    --danger: #e0533f;
+    --focus: #7be0a8;
   }
 
   *, *::before, *::after { box-sizing: border-box; }
@@ -108,7 +131,7 @@
   .btn-mint:disabled { opacity: 1; background: #ffffff14; color: var(--on-dark-2); }
   .btn-ghost { background: transparent; border-color: currentColor; }
   .btn-ghost.soft { border-color: #ffffff3d; }
-  .btn-danger { background: var(--danger); color: #fff; }
+  .btn-danger { background: #c93a2b; color: #fff; }   /* the same red in both looks: white on it stays 5:1 */
   .btn-ink { background: var(--text); color: var(--bg); }
   .btn.sm { min-height: 34px; padding: 0 14px; font-size: 12px; }
   /* Small text actions inside a row */
@@ -138,6 +161,13 @@
   }
   .top.slim .strip { border-bottom: 0; }
   .strip > span { display: inline-flex; align-items: center; gap: 8px; }
+  .strip > .looks { gap: 2px; }
+  .looks button {
+    border: 0; background: none; padding: 3px 7px; border-radius: 999px; cursor: pointer;
+    font: inherit; letter-spacing: inherit; text-transform: inherit; color: var(--on-dark-2);
+  }
+  .looks button:hover { color: var(--on-dark); }
+  .looks button[aria-pressed="true"] { background: #ffffff1a; color: var(--mint-text); }
   .pulse { width: 6px; height: 6px; border-radius: 50%; background: var(--mint); animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .25; transform: scale(.7); } }
   .hero {
@@ -209,7 +239,7 @@
     width: 100%; display: grid; grid-template-columns: 2.4em minmax(0, 1fr) auto 18px; align-items: start; column-gap: 16px;
     padding: 24px 0; border: 0; background: none; text-align: left; cursor: pointer;
   }
-  .sec-num { color: var(--muted-2); padding-top: 10px; }
+  .sec-num { color: var(--muted); padding-top: 10px; }
   .sec-main { display: grid; gap: 6px; min-width: 0; }
   .sec-title { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font: 700 clamp(22px, 2.4vw, 32px)/1.08 var(--f-display); letter-spacing: -0.025em; }
   .tag { font-family: var(--f-mono); font-weight: 500; font-size: 10.5px; letter-spacing: .08em; padding: 4px 8px; border: 1px solid var(--warn-line); border-radius: 999px; color: var(--warn); }
@@ -220,12 +250,12 @@
     font: 700 clamp(22px, 2.4vw, 32px)/1.08 var(--f-display); letter-spacing: -0.025em; font-variant-numeric: tabular-nums;
   }
   .sec-size .ico { font-size: 16px; color: var(--muted-2); }
-  .sec-size .muted { color: var(--muted-2); }
+  .sec-size .muted { color: var(--muted); }
   .pm { width: 18px; height: 18px; position: relative; margin-top: 8px; }
   .pm::before, .pm::after { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 1.5px; background: currentColor; transition: transform .4s var(--ease); }
   .pm::after { transform: rotate(90deg); }
   .open .pm::after { transform: rotate(0); }
-  .sec.empty .sec-title, .sec.empty .sec-size { color: var(--muted-2); }
+  .sec.empty .sec-title, .sec.empty .sec-size { color: var(--muted); }
   .notes:empty { display: none; }
   .notes { display: grid; gap: 8px; padding: 0 0 20px calc(18px + 16px + 2.4em + 16px); margin-top: -8px; }
   .note { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; color: var(--text-2); overflow-wrap: anywhere; }
@@ -259,8 +289,8 @@
     .row-keep { opacity: 0; transition: opacity .2s; }
     .row:hover .row-keep, .row:focus-within .row-keep { opacity: 1; }
   }
-  .row.off .row-name, .row.off .row-size, .row.stale .row-name, .row.stale .row-size { color: var(--muted-2); }
-  .row.is-queued .row-size, .row.is-next .row-size { color: var(--muted-2); letter-spacing: .06em; text-transform: uppercase; font-size: 11px; }
+  .row.off .row-name, .row.off .row-size, .row.stale .row-name, .row.stale .row-size { color: var(--muted); }
+  .row.is-queued .row-size, .row.is-next .row-size { color: var(--muted); letter-spacing: .06em; text-transform: uppercase; font-size: 11px; }
   .row.is-deleting label { background: var(--accent-soft); }
   .row.is-deleting .row-size { color: var(--accent); text-transform: uppercase; letter-spacing: .06em; font-size: 11px; }
   .row.is-done .row-size { color: var(--accent); text-transform: uppercase; letter-spacing: .06em; font-size: 11px; }
@@ -453,6 +483,11 @@
         <span id="st-disk">This Mac</span>
         <span id="st-free">Free space –</span>
         <span><i class="pulse" id="st-pulse"></i><span id="st-scan">Starting</span></span>
+        <span class="looks" id="looks" role="group" aria-label="Light or dark">
+          <button type="button" data-look="auto" aria-pressed="true" title="Follow this Mac">Auto</button>
+          <button type="button" data-look="light" aria-pressed="false">Light</button>
+          <button type="button" data-look="dark" aria-pressed="false">Dark</button>
+        </span>
       </div>
       <div id="clean-hero">
         <div class="hero">
@@ -1933,6 +1968,19 @@ $('seg').addEventListener('click', event => {
   if (button && !D.loading) loadDisk(button.dataset.view, '');
 });
 $('apps-again').addEventListener('click', loadApps);
+
+// Light, Dark, or Auto (follow the Mac). Kept in this browser only; Auto when storage is off.
+function setLook(look, save) {
+  if (look === 'light' || look === 'dark') document.documentElement.dataset.theme = look;
+  else delete document.documentElement.dataset.theme;
+  for (const button of $('looks').children) button.setAttribute('aria-pressed', String(button.dataset.look === (look || 'auto')));
+  if (save) try { localStorage.setItem('headroom-theme', look); } catch (error) { /* this window only */ }
+}
+setLook(document.documentElement.dataset.theme || 'auto', false);
+$('looks').addEventListener('click', event => {
+  const button = event.target.closest('[data-look]');
+  if (button) setLook(button.dataset.look, true);
+});
 addEventListener('resize', () => { if (S.disk && !S.gone) renderHero(); });
 
 async function boot() {
