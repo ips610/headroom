@@ -245,6 +245,7 @@ def item(group, name, paths, kb, detail="", cmd=None, quit=None, blocked=""):
         "note": "",          # one plain line under the row
         "recent": False,     # used in the last week: ticking the whole section leaves it out
         "safe": False,       # "Safe clean" may tick it
+        "tidy": False,       # worth a line even under MIN_KB: clutter you'd still want gone
     }
 
 
@@ -977,7 +978,9 @@ def installer_places():
             (home("Library", "Containers", "com.apple.mail", "Data", "Library", "Mail Downloads"), 2)]
 
 
-def find_installers():
+def find_installers(wanted=None):
+    """Installers (or, with `wanted`, other files it picks) in Downloads, on the Desktop and in Mail."""
+    wanted = wanted or (lambda path, low: low.endswith(INSTALLERS) or (low.endswith(".zip") and zipped_installer(path)))
     found = []
     for root, depth in installer_places():
         level = [root]
@@ -985,7 +988,7 @@ def find_installers():
             deeper = []
             for path in [p for folder in level for p in children(folder)]:
                 low = path.lower()
-                if low.endswith(INSTALLERS) or (low.endswith(".zip") and zipped_installer(path)):
+                if wanted(path, low):
                     found.append(path)
                 elif (os.path.isdir(path) and not os.path.islink(path) and not low.endswith(BUNDLE_SUFFIXES)
                       and not os.path.basename(path).startswith(".")):
@@ -1014,6 +1017,198 @@ def scan_installers():
             row["note"] = "Downloaded this week, so ticking the whole section leaves it out."
         rows.append(row)
     return rows
+
+
+# --- qBittorrent ---------------------------------------------------------------------------------
+
+QBIT = ("Quit qBittorrent first", [re.escape("/qBittorrent.app/Contents/MacOS/qbittorrent")])
+PIECES = re.compile(r"\.!qB$|^\.[0-9a-f]{40}\.parts$")   # unfinished files, and libtorrent's parts files
+PIECE_FOLDER_LIMIT = 5000   # a folder this full with no pieces is a dataset, not a download: not walked on
+PIECE_BUDGET = 200_000      # entries looked at in all, so a huge tree can't stall the scan
+
+
+def bdecode(data, at=0):
+    """One bencoded value (the format of .torrent and .fastresume files): (value, where it ends)."""
+    kind = data[at:at + 1]
+    if kind == b"i":
+        end = data.index(b"e", at)
+        return int(data[at + 1:end]), end + 1
+    if kind in (b"l", b"d"):
+        found, at = [], at + 1
+        while data[at:at + 1] != b"e":
+            value, at = bdecode(data, at)
+            found.append(value)
+        return (dict(zip(found[::2], found[1::2])) if kind == b"d" else found), at + 1
+    colon = data.index(b":", at)
+    end = colon + 1 + int(data[at:colon])
+    if end > len(data):
+        raise ValueError("cut short")
+    return data[colon + 1:end], end
+
+
+def bfile(path):
+    try:
+        with open(path, "rb") as handle:
+            value = bdecode(handle.read())[0]
+    except (OSError, ValueError, IndexError, RecursionError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def btext(value):
+    return value.decode("utf-8", "surrogateescape") if isinstance(value, bytes) else ""
+
+
+def qbit_settings():
+    """Folders qBittorrent's settings save into: save and temp paths, and the save path history."""
+    found = []
+    for ini in (home(".config", "qBittorrent", "qBittorrent.ini"),
+                home("Library", "Preferences", "qBittorrent", "qBittorrent.ini")):
+        try:
+            with open(ini, encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            key, equals, value = line.partition("=")
+            name = key.strip().rsplit("\\", 1)[-1]
+            if equals and name in ("SavePathHistory", "DefaultSavePath", "SavePath", "TempPath", "DownloadPath"):
+                found += value.split(", ") if name == "SavePathHistory" else [value]
+    return [os.path.expanduser(p.strip().strip('"')) for p in found if p.strip().strip('"')]
+
+
+def qbit_session():
+    """What qBittorrent's current session uses, from BT_backup: (paths whose unfinished files stay,
+    info hashes, torrent names, save folders). None when the session can't be read in full, so
+    nothing unfinished is offered."""
+    backup = home("Library", "Application Support", "qBittorrent", "BT_backup")
+    try:
+        names = os.listdir(backup)
+    except FileNotFoundError:
+        return [], set(), set(), []
+    except OSError:
+        return None
+    configured = qbit_settings()
+    keep, hashes, titles, folders = [], set(), set(), []
+    for name in names:
+        if not name.endswith(".fastresume"):
+            continue
+        digest = name[:-len(".fastresume")].lower()
+        resume = bfile(os.path.join(backup, name))
+        if resume is None:
+            return None
+        torrent = bfile(os.path.join(backup, digest + ".torrent")) or {}
+        info = torrent.get(b"info") if isinstance(torrent.get(b"info"), dict) else {}
+        title = btext(info.get(b"name")) or btext(resume.get(b"name"))
+        # Where its files are: its save path and download path, and (for older versions) the
+        # temp path from the settings.
+        own = [btext(resume.get(k)) for k in (b"save_path", b"qBt-savePath", b"qBt-downloadPath")]
+        own = [os.path.expanduser(p) for p in own if p]
+        mapped = resume.get(b"mapped_files") if isinstance(resume.get(b"mapped_files"), list) else []
+        hashes.add(digest)
+        folders += own
+        if title:
+            titles.add(title)
+            keep += [os.path.join(p, title) for p in own + configured]
+        if mapped or not title:
+            # Files renamed inside the torrent, or no name to go by: its own folders stay whole.
+            keep += own + [os.path.join(p, btext(m)) for m in mapped if btext(m) for p in configured]
+    return keep, hashes, titles, folders
+
+
+def kept_piece(path, keep, hashes):
+    found = re.match(r"^\.([0-9a-f]{40})\.parts$", os.path.basename(path))
+    if found:
+        return found.group(1) in hashes
+    return any(path in (k, k + ".!qB") or path.startswith(k.rstrip(os.sep) + os.sep) for k in keep)
+
+
+def find_pieces(roots):
+    """Unfinished torrent files under these folders, six levels down at most. A folder with
+    thousands of entries and no pieces is a dataset or an archive: it isn't walked any further."""
+    found, budget = set(), PIECE_BUDGET
+    for root in roots:
+        level = [root]
+        for _ in range(6):
+            deeper = []
+            for folder in level:
+                inside, seen, hit = [], 0, False
+                try:
+                    with os.scandir(folder) as entries:
+                        for entry in entries:
+                            seen, budget = seen + 1, budget - 1
+                            if PIECES.search(entry.name) and entry.is_file(follow_symlinks=False):
+                                found.add(entry.path)
+                                hit = True
+                            elif (entry.is_dir(follow_symlinks=False) and entry.name not in SKIP_ANYWHERE
+                                  and entry.name not in PROJECT_DIRS and not entry.name.endswith(BUNDLE_SUFFIXES)):
+                                inside.append(entry.path)
+                            if budget <= 0 or (seen > PIECE_FOLDER_LIMIT and not hit):
+                                inside = []
+                                break
+                except OSError:
+                    pass
+                deeper += inside
+            level = deeper
+    return sorted(found)
+
+
+def scan_qbittorrent():
+    """What qBittorrent leaves lying about. Never its session (BT_backup), its settings or a
+    finished download: only logs, the location database, old .torrent files and the unfinished
+    pieces of torrents that are no longer in the session."""
+    support = home("Library", "Application Support", "qBittorrent")
+    rows = []
+
+    def add(group, name, paths, detail, tidy=True):
+        if paths:
+            row = item(group, name, paths, sum(du(paths).values()), detail, quit=QBIT)
+            row["tidy"] = tidy
+            rows.append(row)
+
+    add("temp", "qBittorrent logs", children(os.path.join(support, "logs")), tilde(os.path.join(support, "logs")))
+    geo = os.path.join(support, "GeoDB")
+    add("apps", "qBittorrent location database", [geo] if os.path.isdir(geo) and not os.path.islink(geo) else [],
+        f"Shows which country each peer is in. qBittorrent downloads it again. {tilde(geo)}")
+    session = qbit_session()
+    notice = ""
+    if session is None:
+        notice = ("headroom could not read qBittorrent's list of torrents, so it leaves unfinished "
+                  "downloads alone.")
+        keep, hashes, titles, folders = [], set(), set(), []
+    else:
+        keep, hashes, titles, folders = session
+        roots = [p for p in dict.fromkeys(qbit_settings() + folders + [home("Downloads")])
+                 if p.startswith(HOME + os.sep) and os.path.isdir(p) and not os.path.islink(p)]
+        groups = {}
+        for path in find_pieces(roots):
+            if not kept_piece(path, keep, hashes):
+                root = max((r for r in roots if path.startswith(r + os.sep)), key=len)
+                first = os.path.relpath(path, root).split(os.sep)[0]
+                label = first[:-len(".!qB")] if first.endswith(".!qB") else first
+                if PIECES.match(first) and first.endswith(".parts"):
+                    label = f"pieces ({first[1:9]})"      # libtorrent names these after the info hash
+                groups.setdefault((root, label), []).append(path)
+        for (root, label), paths in sorted(groups.items()):
+            add("big", f"Unfinished torrent {label}", paths,
+                f"{count(len(paths), 'unfinished file', 'unfinished files')} of a torrent that is no longer in "
+                f"qBittorrent. Adding it again starts over. {tilde(root)}", tidy=False)
+    # .torrent files already added, or lying around for over a month.
+    old = time.time() - 30 * DAY
+    used = []
+    for path in find_installers(lambda path, low: low.endswith(".torrent")):
+        info = (bfile(path) or {}).get(b"info")
+        title = btext(info.get(b"name")) if isinstance(info, dict) else ""
+        try:
+            stale = added(path) < old
+        except OSError:
+            continue
+        if (title and title in titles) or stale:
+            used.append(path)
+    add("installers", count(len(used), ".torrent file", ".torrent files"), used,
+        "Already added to qBittorrent, or downloaded over a month ago. What they downloaded stays. "
+        + ", ".join(sorted({tilde(os.path.dirname(p)) for p in used})))
+    return rows, notice
 
 
 # --- leftovers of deleted apps -----------------------------------------------------------------
@@ -1167,6 +1362,7 @@ def scan_leftovers():
         kb = sum(sizes.get(p, 0) for p in group["paths"])
         row = item("leftovers", group["name"], group["paths"], kb,
                    f"{', '.join(sorted(group['labels']))} · {', '.join(sorted(group['ids']))}")
+        row["tidy"] = True
         if group["sealed"]:
             row["note"] = "Its sandbox container is protected by macOS, so that part stays."
         (rows if kb >= MIN_KB else small).append(row)
@@ -1175,6 +1371,7 @@ def scan_leftovers():
         detail = ", ".join(names[:8]) + (f" and {len(names) - 8} more" if len(names) > 8 else "")
         rows.append(item("leftovers", count(len(small), "app with small leftovers", "apps with small leftovers"),
                          [p for r in small for p in r["paths"]], sum(r["kb"] for r in small), detail))
+        rows[-1]["tidy"] = True
     else:
         rows += small
     return rows
@@ -1192,6 +1389,7 @@ SOURCES = {
     "app_extras": (("apps",), scan_app_extras),
     "sandboxed": (("apps",), scan_sandboxed),
     "leftovers": (("leftovers",), scan_leftovers),
+    "qbittorrent": (("temp", "apps", "installers", "big"), scan_qbittorrent),
     "home_cache": (("dev",), scan_home_cache),
     "docker": (("dev", "big"), scan_docker),
     "big": (("big",), scan_big),
@@ -1350,7 +1548,7 @@ def history(limit=400):
 def scan(source):
     found = SOURCES[source][1]()
     rows, notice = found if isinstance(found, tuple) else (found, "")
-    rows = [r for r in unprotected(rows) if r["kb"] >= MIN_KB or r["blocked"] or r["group"] == "leftovers"]
+    rows = [r for r in unprotected(rows) if r["kb"] >= MIN_KB or r["blocked"] or r["tidy"]]
     with LOCK:
         FOUND[source] = {r["id"]: r for r in rows}
     running = processes()
@@ -1856,6 +2054,15 @@ class Handler(BaseHTTPRequestHandler):
         cookie = jar.get("headroom")
         return cookie is not None and secrets.compare_digest(cookie.value.encode(), TOKEN.encode())
 
+    def typed(self):
+        """True for the person opening headroom themselves: a top-level navigation the browser
+        says no other site started. Typed or bookmarked is `none`; arriving through the port-80
+        door at http://headroom.localhost/ is `same-site`. A link or redirect from a website says
+        cross-site, and a browser too old to say anything gets no session either."""
+        dest, mode = self.headers.get("Sec-Fetch-Dest"), self.headers.get("Sec-Fetch-Mode")
+        navigating = dest == "document" or (dest is None and mode == "navigate")
+        return navigating and self.headers.get("Sec-Fetch-Site") in ("none", "same-origin", "same-site")
+
     def allowed(self):
         """Only this launch's page may use the API: the right Host, the cookie, and a header no
         cross-site form can send. A tab from an earlier launch gets 410 and says headroom closed."""
@@ -1891,10 +2098,7 @@ class Handler(BaseHTTPRequestHandler):
                     headers["Set-Cookie"] = COOKIE
                 return self.reply(303, b"", "text/plain", headers)
             headers = {}
-            if not self.signed_in() and self.headers.get("Sec-Fetch-Site") == "none":
-                # Typed into the address bar or opened from a bookmark: the browser says no other
-                # site started this, so it is the person, and they get a session. A link or
-                # redirect from another site says cross-site (or nothing) and gets the page only.
+            if not self.signed_in() and self.typed():
                 headers["Set-Cookie"] = COOKIE
             with open(os.path.join(HERE, "ui.html"), "rb") as page:
                 return self.reply(200, page.read().replace(b"__RUN__", RUN.encode()), "text/html; charset=utf-8",

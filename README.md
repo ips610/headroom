@@ -4,8 +4,8 @@ My Mac ran out of space, so I made this to see what was eating it and clear the 
 headroom finds caches and leftover files, shows how much space each one takes, and deletes
 only what you tick. It can also uninstall apps, show you what's big, and run a few macOS fixes.
 
-It runs as a small page in your browser at `headroom.localhost:8460`. Nothing leaves your Mac,
-and nothing gets deleted until you confirm.
+It runs as a small page in your browser at `headroom.localhost`. Nothing leaves your Mac, and
+nothing gets deleted until you confirm.
 
 ## Download
 
@@ -37,13 +37,16 @@ list before anything goes.
 headroom has a Dock icon while it runs. Click it to bring the page back, and right-click it →
 Quit (or ⌘Q) to stop headroom. Closing the tab stops it too.
 
-You can also just type `headroom.localhost:8460` in your browser, even when headroom is closed,
-and it starts. macOS keeps that address free for it, so nothing actually runs until you visit.
-If you ever want that gone:
+You can also just type `headroom.localhost` in your browser, even when headroom is closed, and
+it starts. macOS keeps that address free for it, so nothing actually runs until you visit. (If
+Safari searches for it instead, type `headroom.localhost/` once.) The page itself lives on port
+8460; the plain name is a tiny redirect on port 80 that also knows `harbor.localhost`, my other
+app. If you ever want all that gone:
 
 ```sh
 launchctl bootout gui/$(id -u)/local.headroom.door
-rm ~/Library/LaunchAgents/local.headroom.door.plist
+launchctl bootout gui/$(id -u)/local.localhost.door
+rm ~/Library/LaunchAgents/local.headroom.door.plist ~/Library/LaunchAgents/local.localhost.door.plist
 ```
 
 The first scan may ask for access to Desktop, Documents and Downloads. That's how it finds
@@ -69,13 +72,13 @@ just tells you what it couldn't see.
 | Section | What's in it |
 | --- | --- |
 | Trash and browser caches | the Trash, and the cache folders of Safari, Chrome, Firefox, Arc, Brave and Edge (never history, logins or cookies) |
-| App caches | everything in `~/Library/Caches`, the cache folders of apps like Slack, VS Code and Notion, caches inside sandboxed apps, Spotify's and Adobe's media caches |
-| Logs and temporary files | `~/Library/Logs` and temp files nobody has touched for a day |
-| Installer files | `.dmg`, `.pkg`, `.iso`, `.xip` and zipped apps in Downloads and on the Desktop |
+| App caches | everything in `~/Library/Caches`, the cache folders of apps like Slack, VS Code and Notion, caches inside sandboxed apps, Spotify's and Adobe's media caches, qBittorrent's location database |
+| Logs and temporary files | `~/Library/Logs`, qBittorrent's logs, and temp files nobody has touched for a day |
+| Installer files | `.dmg`, `.pkg`, `.iso`, `.xip` and zipped apps in Downloads and on the Desktop, and `.torrent` files you've already added to qBittorrent or that are over a month old |
 | Developer tool caches | npm, Bun, Gradle, Maven, NuGet, gems, pub, Cargo, rustup, uv, Conda, Deno, Expo, Unity, Arduino, Go modules, Flutter, Xcode DerivedData, old simulators and the caches inside shut-down ones, Docker build cache, old VS Code / Cursor / Windsurf extension versions, `~/.cache` |
 | Project build folders | `node_modules`, `.next`, `dist`, Rust `target`, Swift `.build`, Flutter `build` and `.dart_tool` |
 | Leftovers of deleted apps | settings, caches, saved windows, containers and launch agents of apps that aren't on your Mac any more |
-| Emulators, models and big downloads | Android emulators and system images, iOS simulators, Ollama and LM Studio models, unused Docker images, Xcode archives |
+| Emulators, models and big downloads | Android emulators and system images, iOS simulators, Ollama and LM Studio models, unused Docker images, Xcode archives, unfinished downloads of torrents you removed from qBittorrent |
 
 The last two aren't really cache. They won't come back on their own, so headroom keeps them
 apart and warns you before deleting them.
@@ -101,6 +104,9 @@ deleted app's leftovers, Docker volumes, virtualenvs, Apple's own caches and app
 build folder that doesn't sit next to the file that proves what it is (`package.json`,
 `Cargo.toml`, `Package.swift`, `pubspec.yaml`). If git tracks files in a build folder, it's
 left alone. A deleted app's leftovers only show up when headroom is sure the app is gone.
+With qBittorrent, it never touches your list of torrents, its settings or anything it finished
+downloading, only the half-downloaded pieces of torrents that aren't in the list any more, and
+nothing of it while qBittorrent is open.
 
 ## Is it safe?
 

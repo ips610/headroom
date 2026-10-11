@@ -339,6 +339,98 @@ try:
     assert installers["fresh.iso"]["recent"] and not installers["fresh.iso"]["safe"]
     assert "~/Downloads" in installers["Tool-1.0.dmg"]["detail"] and "added 5 weeks ago" in installers["Tool-1.0.dmg"]["detail"]
 
+    # --- qBittorrent ------------------------------------------------------------------
+    def bencode(value):
+        if isinstance(value, int):
+            return b"i%de" % value
+        if isinstance(value, str):
+            value = value.encode()
+        if isinstance(value, bytes):
+            return b"%d:%s" % (len(value), value)
+        if isinstance(value, list):
+            return b"l" + b"".join(map(bencode, value)) + b"e"
+        return b"d" + b"".join(bencode(k) + bencode(value[k]) for k in sorted(value)) + b"e"
+
+    def write(path, data):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(data)
+        return path
+
+    support = os.path.join(cleaner.HOME, "Library", "Application Support", "qBittorrent")
+    backup = os.path.join(support, "BT_backup")
+    downloads, research = os.path.join(cleaner.HOME, "Downloads"), os.path.join(cleaner.HOME, "Desktop", "Research", "VirusShare")
+
+    def in_session(digest, name, save, **resume):
+        write(os.path.join(backup, digest + ".torrent"),
+              bencode({"announce": "x", "info": {"name": name, "piece length": 16384, "pieces": b"p" * 20}}))
+        write(os.path.join(backup, digest + ".fastresume"),
+              bencode({"save_path": save, "qBt-savePath": save, "name": name, "file-format": "libtorrent resume file", **resume}))
+
+    put("logs", "qbittorrent.log", kb=100, root=support)
+    put("GeoDB", "dbip-country-lite.mmdb", kb=900, root=support)
+    rss = put("rss", "feeds.json", kb=1, root=support)
+    config = write(os.path.join(cleaner.HOME, ".config", "qBittorrent", "qBittorrent.ini"), (
+        "[AddNewTorrentDialog]\nSavePathHistory=%s, %s\n[BitTorrent]\nSession\\TempPath=%s\n"
+        % (research, downloads, os.path.join(downloads, "incomplete"))).encode())
+    in_session("a" * 40, "Movie Pack", downloads)
+    in_session("b" * 40, "VirusShare_00373.zip", research)
+    in_session("c" * 40, "Renamed", os.path.join(downloads, "renamed-place"), mapped_files=["other.bin"])
+    finished = put("Movie Pack", "done.mkv", kb=50, root=downloads)                    # a finished file: never offered
+    kept_pieces = [
+        put("Movie Pack", "part1.mkv.!qB", kb=50, root=downloads),                     # in the session
+        put("incomplete", "Movie Pack", "part2.mkv.!qB", kb=50, root=downloads),       # its temp path
+        put("VirusShare_00373.zip.!qB", kb=50, root=research),                         # single-file torrent
+        put("renamed-place", "whatever.bin.!qB", kb=50, root=downloads),               # renamed files: whole folder stays
+        put("." + "a" * 40 + ".parts", kb=50, root=downloads),                         # parts file of a live torrent
+    ]
+    orphans = [
+        put("Old Show", "season 1", "ep1.mkv.!qB", kb=50, root=downloads),
+        put("single.iso.!qB", kb=50, root=downloads),
+        put("VirusShare_00100.zip.!qB", kb=50, root=research),
+        put("." + "d" * 40 + ".parts", kb=50, root=downloads),
+    ]
+    dataset = put("VirusShare_00001.zip", kb=50, root=research)                          # finished dataset file
+    for n in range(60):                                                                 # a dataset folder with no pieces...
+        put("big-dataset", f"sample{n:03}", kb=0, root=research)
+    hidden = put("big-dataset", "deeper", "late.zip.!qB", kb=50, root=research)        # ...isn't walked on
+    used_torrent = write(os.path.join(downloads, "movie.torrent"), bencode({"info": {"name": "Movie Pack"}}))
+    fresh_torrent = write(os.path.join(downloads, "fresh.torrent"), bencode({"info": {"name": "Fresh"}}))
+    old_torrent = write(os.path.join(downloads, "ancient.torrent"), bencode({"info": {"name": "Ancient"}}))
+    age(old_torrent, 40)
+    deep_torrent = write(os.path.join(research, "list.torrent"), bencode({"info": {"name": "Movie Pack"}}))
+    cleaner.PIECE_FOLDER_LIMIT = 50
+    qbit, notice = cleaner.scan_qbittorrent()
+    qbit = named(qbit)
+    assert notice == "", notice
+    assert qbit["qBittorrent logs"]["group"] == "temp" and qbit["qBittorrent logs"]["tidy"]
+    assert qbit["qBittorrent location database"]["group"] == "apps"
+    pieces = {name: row for name, row in qbit.items() if name.startswith("Unfinished torrent")}
+    assert sorted(pieces) == sorted(["Unfinished torrent pieces (dddddddd)", "Unfinished torrent Old Show",
+                                     "Unfinished torrent VirusShare_00100.zip", "Unfinished torrent single.iso"]), sorted(pieces)
+    assert all(row["group"] == "big" for row in pieces.values())
+    assert sorted(p for row in pieces.values() for p in row["paths"]) == sorted(orphans), "only orphaned pieces"
+    assert "VirusShare" in pieces["Unfinished torrent VirusShare_00100.zip"]["detail"]
+    assert sorted(qbit["2 .torrent files"]["paths"]) == sorted([used_torrent, old_torrent])
+    assert qbit["2 .torrent files"]["group"] == "installers"
+    offered = {p for row in qbit.values() for p in row["paths"]}
+    for never in [finished, dataset, hidden, config, rss, fresh_torrent, deep_torrent] + kept_pieces:
+        assert never not in offered, never
+    assert not any(p.startswith(backup) for p in offered), "the session itself is never offered"
+    running = "/Applications/qBittorrent.app/Contents/MacOS/qbittorrent\n"
+    assert all(cleaner.blocked(row, running) == "Quit qBittorrent first" for row in qbit.values())
+    assert not any(cleaner.blocked(row, "/Applications/qBittorrent.app/Contents/Frameworks/x\n") for row in qbit.values())
+    for row in pieces.values():
+        assert cleaner.delete(row)["errors"] == []
+    assert not any(os.path.exists(p) for p in orphans)
+    assert all(os.path.exists(p) for p in kept_pieces + [finished, dataset, hidden, config, rss])
+    # A session headroom can't read in full means no unfinished file is offered at all.
+    broken = write(os.path.join(backup, "e" * 40 + ".fastresume"), b"d9:save_path")
+    put("Lost", "x.bin.!qB", kb=50, root=downloads)
+    qbit, notice = cleaner.scan_qbittorrent()
+    assert not any(row["name"].startswith("Unfinished") for row in qbit) and "could not read" in notice
+    os.remove(broken)
+
     # --- caches inside sandboxed apps -------------------------------------------
     sandboxed, notice = cleaner.scan_sandboxed()
     keeper = named(sandboxed)["Keeper cache"]
@@ -580,15 +672,23 @@ try:
     assert status == 200 and cleaner.RUN.encode() in page and b"__RUN__" not in page
     assert call("/favicon.svg", cookie=None, run=None)[1].startswith(b"<svg")
     assert call("/", host="evil.example:80", cookie=None, run=None)[0] == 403, "DNS rebinding gets nothing"
-    # Typing headroom.localhost into the address bar (or a bookmark) opens a session; a link or
-    # redirect from another site gets the page, which says to open headroom from Applications.
-    status, page, reply = call("/", cookie=None, run=None, extra={"Sec-Fetch-Site": "none"})
+    # Typing headroom.localhost (or using a bookmark, or the port-80 door's redirect) opens a session;
+    # a link or redirect from another site gets the page, which says to open headroom from Applications.
+    def visit(site, mode="navigate", dest="document", **options):
+        sent = {k: v for k, v in (("Sec-Fetch-Site", site), ("Sec-Fetch-Mode", mode), ("Sec-Fetch-Dest", dest)) if v}
+        return call("/", cookie=options.pop("cookie", None), run=None, extra=sent, **options)
+    status, page, reply = visit("none")
     assert status == 200 and reply.getheader("Set-Cookie") == cleaner.COOKIE and b"headroom-run" in page
-    for site in ("cross-site", "same-site", "same-origin", None):
-        status, _, reply = call("/", cookie=None, run=None, extra={"Sec-Fetch-Site": site} if site else None)
-        assert status == 200 and reply.getheader("Set-Cookie") is None, site
-    assert call("/", cookie=None, run=None, extra={"Sec-Fetch-Site": "none"}, host="evil.example:80")[0] == 403
-    assert call("/", run=None, extra={"Sec-Fetch-Site": "none"})[2].getheader("Set-Cookie") is None, "already in"
+    for site, mode, dest in (("same-site", "navigate", "document"), ("same-origin", "navigate", "document"),
+                             ("none", "navigate", None)):
+        assert visit(site, mode, dest)[2].getheader("Set-Cookie") == cleaner.COOKIE, (site, mode, dest)
+    for site, mode, dest in (("cross-site", "navigate", "document"), (None, "navigate", "document"),
+                             ("same-site", "cors", "empty"), ("same-site", "no-cors", "image"),
+                             ("same-site", "navigate", "iframe"), ("none", None, None), (None, None, None)):
+        status, _, reply = visit(site, mode, dest)
+        assert status == 200 and reply.getheader("Set-Cookie") is None, (site, mode, dest)
+    assert visit("none", host="evil.example:80")[0] == 403, "the Host check comes first"
+    assert visit("none", cookie=cookie)[2].getheader("Set-Cookie") is None, "already signed in"
     assert call("/api/start")[0] == 200
     assert call("/api/start", host=f"127.0.0.1:{port}")[0] == 200
     assert call("/api/start", host=f"[::1]:{port}", address="::1")[0] == 200, "the ::1 listener answers"
