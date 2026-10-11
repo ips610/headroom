@@ -2105,6 +2105,15 @@ class Handler(BaseHTTPRequestHandler):
                                   headers)
         if url.path == "/favicon.svg" and self.local():
             return self.reply(200, ICON.encode(), "image/svg+xml")
+        # Safari's tab bar skips SVG icons and shows a letter instead, so offer PNGs too.
+        pngs = {"/favicon-32.png": "favicon-32.png", "/favicon.ico": "favicon-32.png",
+                "/apple-touch-icon.png": "apple-touch-icon.png"}
+        if url.path in pngs and self.local():
+            try:
+                with open(os.path.join(HERE, pngs[url.path]), "rb") as icon:
+                    return self.reply(200, icon.read(), "image/png")
+            except OSError:
+                return self.reply(404, b"", "text/plain")
         if not self.allowed():
             return
         DEADLINE = time.time() + IDLE

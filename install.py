@@ -50,7 +50,7 @@ def build(app):
     shutil.rmtree(app, ignore_errors=True)
     os.makedirs(os.path.join(contents, "MacOS"))
     os.makedirs(os.path.join(contents, "Resources"))
-    for name in ("cleaner.py", "ui.html", "icon.icns"):
+    for name in ("cleaner.py", "ui.html", "icon.icns", "favicon-32.png", "apple-touch-icon.png"):
         shutil.copy(os.path.join(HERE, name), os.path.join(contents, "Resources"))
     info = dict(INFO)
     # The Dock launcher gives headroom a Dock icon and a Quit; it is compiled for this Mac's chip.

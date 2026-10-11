@@ -20,7 +20,8 @@ build() {
   arch=$1 zip=$2
   .venv-build/bin/pyinstaller --noconfirm --clean --log-level WARN --windowed --name headroom \
     --target-arch "$arch" --osx-bundle-identifier local.headroom --icon "$here/icon.icns" \
-    --add-data "$here/ui.html:." --distpath "build/dist-$arch" --workpath "build/work-$arch" \
+    --add-data "$here/ui.html:." --add-data "$here/favicon-32.png:." --add-data "$here/apple-touch-icon.png:." \
+    --distpath "build/dist-$arch" --workpath "build/work-$arch" \
     --specpath build cleaner.py
   app="build/dist-$arch/headroom.app"
   # The Dock launcher becomes the app's main program and starts the frozen server beside it,
