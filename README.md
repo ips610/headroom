@@ -5,8 +5,11 @@ headroom finds caches and leftover files, shows how much space each one takes, a
 only what you tick. It can also uninstall apps, find what's big or duplicated, show what starts
 up with your Mac, run a few macOS fixes, and tell you when space runs low.
 
-It runs as a small page in your browser at `headroom.localhost`. Nothing leaves your Mac, and
-nothing gets deleted until you confirm.
+It runs as a small page in your browser at `headroom.localhost`. Nothing about your files leaves
+your Mac, and nothing gets deleted until you confirm. The only thing it ever asks the internet is
+whether there's a new version.
+
+![headroom finding 79.3 GB to clear, in dark mode, with its eight sections and a Safe clean button](docs/screenshots/clean-dark.png)
 
 ## Download
 
@@ -30,6 +33,8 @@ Open headroom and it scans your Mac. The numbers from last time show straight aw
 out, and each section fills in again as it's measured. Tick a whole section or open it to
 pick single items, then hit Delete. A progress bar shows how it's going and you can stop it
 any time. Deleted files don't go to the Trash, so check what you tick.
+
+![The App caches section opened in light mode, showing each cache with its size and where it lives](docs/screenshots/clean-light.png)
 
 If you just want space back, press **Safe clean**. It picks only what can't hurt: app caches,
 old logs and temp files, and installers you downloaded over a month ago. You still see the
@@ -72,6 +77,13 @@ free 500 MB or more, it says how much. It checks every half hour in the backgrou
 repeats itself within six hours unless another 5 GB went, and never deletes anything on its
 own. The first time you open headroom, macOS asks whether it may send notifications. Click one
 and headroom opens. You can turn either reminder off, or change the 20 GB, under Maintenance.
+
+### Updates
+
+When you open headroom, it asks GitHub whether there's a newer version, at most once a day. If
+there is, the top bar says so, with a link to it. Maintenance → Updates has a **Check for
+updates** button too. To update, download the new zip, unzip it and drag headroom into
+Applications over the old one. Your settings, history and "Never offered" list stay.
 
 ### Full Disk Access
 

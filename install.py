@@ -6,11 +6,14 @@ Run it again after changing cleaner.py or ui.html: the app holds its own copies.
 import os
 import platform
 import plistlib
+import re
 import shutil
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NAME = "headroom"
+with open(os.path.join(HERE, "cleaner.py")) as source:
+    VERSION = re.search(r'^VERSION = "([^"]+)"', source.read(), re.M).group(1)
 
 # Used only when there is no Swift compiler for the Dock launcher in launcher/.
 LAUNCHER = """#!/bin/sh
@@ -31,7 +34,7 @@ INFO = {
     "CFBundleIdentifier": "local.headroom",
     "CFBundleExecutable": "headroom",
     "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "1.3",
+    "CFBundleShortVersionString": VERSION,
     "CFBundleIconFile": "icon",
 }
 

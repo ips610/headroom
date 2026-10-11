@@ -9,7 +9,7 @@ set -eu
 cd "$(dirname "$0")"
 here=$(pwd)
 py=${PY:-/Library/Frameworks/Python.framework/Versions/3.11/bin/python3}
-version=$(sed -n 's/.*"CFBundleShortVersionString": "\([^"]*\)".*/\1/p' install.py)
+version=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' cleaner.py)
 
 [ -x .venv-build/bin/pyinstaller ] || {
   "$py" -m venv .venv-build

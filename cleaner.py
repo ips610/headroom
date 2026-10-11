@@ -12,6 +12,7 @@ import datetime
 import errno
 import functools
 import hashlib
+import http.client
 import http.cookies
 import json
 import os
@@ -20,6 +21,7 @@ import re
 import secrets
 import shutil
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -54,6 +56,10 @@ PORTS = list(range(8460, 8480))
 TOKEN = secrets.token_urlsafe(24)
 RUN = secrets.token_hex(8)
 COOKIE = f"headroom={TOKEN}; Path=/; HttpOnly; SameSite=Strict"
+
+# install.py and package.sh read the version from here. A newer release on GitHub shows up in the app.
+VERSION = "1.4"
+RELEASES = "https://github.com/ips610/headroom/releases"
 
 APPLICATIONS = "/Applications"
 SYSTEM_APPLICATIONS = "/System/Applications"
@@ -2379,6 +2385,43 @@ def settings():
             "alert_gb": gb if isinstance(gb, int) and 1 <= gb <= 1000 else 20}
 
 
+def newest_release():
+    """The version on the Releases page. GitHub answers /releases/latest with a redirect to
+    /releases/tag/v1.4; reading that needs no API key and isn't held to the API's hourly limit,
+    which everyone behind one campus or office address shares."""
+    # The frozen app's Python has no certificates of its own; macOS keeps a bundle here.
+    cafile = "/etc/ssl/cert.pem" if os.path.exists("/etc/ssl/cert.pem") else None
+    host = http.client.HTTPSConnection("github.com", timeout=10, context=ssl.create_default_context(cafile=cafile))
+    try:
+        host.request("HEAD", urlparse(RELEASES).path + "/latest", headers={"User-Agent": f"headroom/{VERSION}"})
+        location = host.getresponse().getheader("Location") or ""
+    finally:
+        host.close()
+    match = re.search(r"/tag/v?(\d+(?:\.\d+)*)$", location)
+    if not match:
+        raise ValueError("no release")
+    return match.group(1)
+
+
+def update_info(force=False):
+    """Is there a newer headroom? Asks GitHub at most once a day, or when the page says to."""
+    saved = load_state("update.json", {})
+    saved = saved if isinstance(saved, dict) else {}
+    error = None
+    if force or not isinstance(saved.get("checked"), (int, float)) or time.time() - saved["checked"] > 86400:
+        try:
+            saved = {"checked": time.time(), "latest": newest_release()}
+            save_state("update.json", saved)
+        except (OSError, http.client.HTTPException, ValueError):
+            error = "GitHub didn't answer. Try again later."
+    latest = saved.get("latest")
+    if not (isinstance(latest, str) and re.fullmatch(r"\d+(\.\d+)*", latest)):
+        latest = None
+    newer = latest is not None and tuple(map(int, latest.split("."))) > tuple(map(int, VERSION.split(".")))
+    return {"current": VERSION, "latest": latest, "newer": newer, "error": error,
+            "url": f"{RELEASES}/tag/v{latest}" if newer else RELEASES}
+
+
 def launcher_program():
     """The app's own launcher, which can post notifications. None when headroom isn't running
     from an installed app (./run.sh, the tests, a build folder, a copy still in Downloads):
@@ -2717,6 +2760,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {**settings(), "available": launcher_program() is not None})
         if url.path == "/api/space":
             return self.reply(200, space_history())
+        if url.path == "/api/update":
+            return self.reply(200, update_info(query.get("force", [""])[0] == "1"))
         if url.path == "/api/ping":
             return self.reply(200, {})
         self.reply(404, {"error": "not found"})

@@ -1125,6 +1125,33 @@ try:
     finally:
         child.terminate()
         child.wait(10)
+
+    # Update check: GitHub is asked once a day unless forced, a failure keeps the last answer,
+    # and a mangled saved answer is ignored.
+    real_newest, asked = cleaner.newest_release, []
+    def newest(version):
+        def answer():
+            asked.append(version)
+            if isinstance(version, Exception):
+                raise version
+            return version
+        return answer
+    try:
+        cleaner.newest_release = newest("9.0")
+        info = cleaner.update_info(force=True)
+        assert info["newer"] and info["latest"] == "9.0" and info["url"].endswith("/tag/v9.0"), info
+        cleaner.newest_release = newest("9.1")
+        assert cleaner.update_info()["latest"] == "9.0" and asked == ["9.0"], "checked again within a day"
+        cleaner.newest_release = newest(OSError("offline"))
+        info = cleaner.update_info(force=True)
+        assert info["error"] and info["latest"] == "9.0" and info["newer"], info
+        cleaner.newest_release = newest(cleaner.VERSION)
+        assert not cleaner.update_info(force=True)["newer"], "same version shown as an update"
+        cleaner.save_state("update.json", {"checked": time.time(), "latest": "../evil"})
+        info = cleaner.update_info()
+        assert info["latest"] is None and not info["newer"], info
+    finally:
+        cleaner.newest_release = real_newest
     print("ok")
 finally:
     listener.close()
