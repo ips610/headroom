@@ -212,6 +212,9 @@ try:
         except urllib.error.HTTPError as error:
             return error.code, json.loads(error.read())
 
+    with urllib.request.urlopen(base + "/favicon.svg") as reply:      # the tab icon needs no token
+        assert reply.status == 200 and reply.headers["Content-Type"] == "image/svg+xml"
+        assert reply.read().startswith(b"<svg")
     assert call("/api/start")[0] == 200
     assert call("/api/start", token="wrong")[0] == 403
     assert call("/api/start", token="")[0] == 403

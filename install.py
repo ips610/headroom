@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds "headroom.app" in ~/Applications, so it opens from Spotlight or Launchpad.
+"""Builds "headroom.app" in /Applications, so it opens from Finder, Spotlight or Launchpad.
 
 Run it again after changing cleaner.py or ui.html: the app holds its own copies.
 """
@@ -29,6 +29,7 @@ INFO = {
     "CFBundleExecutable": "headroom",
     "CFBundlePackageType": "APPL",
     "CFBundleShortVersionString": "1.1",
+    "CFBundleIconFile": "icon",
     "LSUIElement": True,    # the browser tab is the window, so no Dock icon of its own
 }
 
@@ -47,7 +48,7 @@ def build(app):
     shutil.rmtree(app, ignore_errors=True)
     os.makedirs(os.path.join(contents, "MacOS"))
     os.makedirs(os.path.join(contents, "Resources"))
-    for name in ("cleaner.py", "ui.html"):
+    for name in ("cleaner.py", "ui.html", "icon.icns"):
         shutil.copy(os.path.join(HERE, name), os.path.join(contents, "Resources"))
     with open(os.path.join(contents, "Info.plist"), "wb") as plist:
         plistlib.dump(INFO, plist)
@@ -61,8 +62,14 @@ def build(app):
 
 
 def main():
-    app = os.path.expanduser(f"~/Applications/{NAME}.app")
+    # /Applications is where Finder's Applications folder looks. Admin accounts can write there;
+    # anyone else gets the personal ~/Applications, which Spotlight still finds.
+    folder = "/Applications" if os.access("/Applications", os.W_OK) else os.path.expanduser("~/Applications")
+    app = os.path.join(folder, f"{NAME}.app")
     signed = build(app)
+    old = os.path.expanduser(f"~/Applications/{NAME}.app")
+    if folder == "/Applications" and os.path.isdir(old):
+        shutil.rmtree(old)      # an earlier install went there; one copy is enough
     print("Installed:", app, "" if signed else "(not signed)")
 
 

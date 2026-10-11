@@ -94,6 +94,18 @@ DOCKERS = (
 )
 DU_SLOTS = threading.Semaphore(6)
 
+# The headroom mark for the browser tab: three bars, the short mint one on top, on a dark tile
+# so it reads on light and dark tab strips alike.
+ICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<rect width="64" height="64" rx="14" fill="#0b0b0b"/>
+<g transform="translate(10 10) scale(2)">
+<rect x="2" y="2.5" width="9" height="4.5" rx="2.25" fill="#7be0a8"/>
+<rect x="2" y="9" width="18" height="4.5" rx="2.25" fill="#f3f4f1"/>
+<rect x="2" y="15.5" width="18" height="4.5" rx="2.25" fill="#f3f4f1"/>
+</g>
+</svg>
+"""
+
 
 def home(*parts):
     return os.path.join(HOME, *parts)
@@ -644,7 +656,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy",
                          "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-                         "connect-src 'self'; frame-ancestors 'none'")
+                         "img-src 'self'; connect-src 'self'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(data)
 
@@ -673,6 +685,8 @@ class Handler(BaseHTTPRequestHandler):
             DEADLINE = time.time() + IDLE
             with open(os.path.join(HERE, "ui.html"), "rb") as page:
                 return self.reply(200, page.read(), "text/html; charset=utf-8")
+        if url.path == "/favicon.svg" and self.local():
+            return self.reply(200, ICON.encode(), "image/svg+xml")
         if not self.trusted():
             return self.reply(403, {"error": "forbidden"})
         DEADLINE = time.time() + IDLE

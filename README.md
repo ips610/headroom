@@ -5,8 +5,7 @@ the ones you tick. It opens as a page in your browser, served only to this Mac.
 
 ## Use it
 
-Open **headroom** from Spotlight or Launchpad (installed in `~/Applications`). Or, from
-this folder:
+Open **headroom** from Applications, Spotlight or Launchpad. Or, from this folder:
 
 ```sh
 ./run.sh
@@ -18,6 +17,20 @@ you close the tab.
 
 After changing `cleaner.py` or `ui.html`, run `python3 install.py` to rebuild the app. It
 needs Python 3 (Homebrew's is used if present) and nothing else.
+
+## Install it on another Mac
+
+```sh
+git clone https://github.com/ips610/headroom.git
+cd headroom
+python3 install.py
+```
+
+That builds `headroom.app` into `/Applications` (or `~/Applications` on an account that
+cannot write there). The Mac needs Python 3: if `python3` asks to install the Command Line
+Tools, say yes, or install it with `brew install python`. Because the app is built on that
+Mac, Gatekeeper does not block it. The first scan may ask for access to Desktop, Documents
+and Downloads, which it needs to find project build folders.
 
 A Mac with a full disk often cannot `fork` new processes. The app and the installer are
 written to start programs without forking, so they still open in that state.
