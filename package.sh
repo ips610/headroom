@@ -16,8 +16,11 @@ py=${PY:-/Library/Frameworks/Python.framework/Versions/3.11/bin/python3}
   --target-arch universal2 --osx-bundle-identifier local.headroom --icon "$here/icon.icns" \
   --add-data "$here/ui.html:." --distpath dist --workpath build/work --specpath build cleaner.py
 
-# The browser tab is the window, so no Dock icon of its own; then sign again after the change.
-/usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" dist/headroom.app/Contents/Info.plist
+# The browser tab is the window, so no Dock icon of its own. The version comes from install.py,
+# so both builds say the same. Then sign again after the change.
+version=$(sed -n 's/.*"CFBundleShortVersionString": "\([^"]*\)".*/\1/p' install.py)
+/usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" \
+  -c "Set :CFBundleShortVersionString $version" dist/headroom.app/Contents/Info.plist
 codesign --force --deep --sign - dist/headroom.app
 
 rm -f dist/headroom.zip
