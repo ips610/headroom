@@ -18,7 +18,21 @@ you close the tab.
 After changing `cleaner.py` or `ui.html`, run `python3 install.py` to rebuild the app. It
 needs Python 3 (Homebrew's is used if present) and nothing else.
 
-## Install it on another Mac
+## Share it with someone
+
+**No Python needed on their Mac.** `./package.sh` builds `dist/headroom.zip` (about 13 MB):
+a `headroom.app` with its own Python inside, for both Apple Silicon and Intel Macs. It needs
+the python.org Python 3.11 on the Mac that builds it, and downloads PyInstaller into
+`.venv-build` the first time. Send the zip (AirDrop, Drive, a message). On their Mac:
+
+1. Unzip it and drag `headroom.app` into Applications.
+2. Open it. macOS blocks it the first time because it is not notarised by Apple: open
+   System Settings → Privacy & Security, scroll down, and press **Open Anyway** next to
+   headroom. (Or, in Terminal: `xattr -dr com.apple.quarantine /Applications/headroom.app`.)
+3. It opens a page in their browser. The first scan may ask for access to Desktop,
+   Documents and Downloads, which it needs to find project build folders.
+
+**With GitHub access and Python 3:**
 
 ```sh
 git clone https://github.com/ips610/headroom.git
@@ -27,10 +41,7 @@ python3 install.py
 ```
 
 That builds `headroom.app` into `/Applications` (or `~/Applications` on an account that
-cannot write there). The Mac needs Python 3: if `python3` asks to install the Command Line
-Tools, say yes, or install it with `brew install python`. Because the app is built on that
-Mac, Gatekeeper does not block it. The first scan may ask for access to Desktop, Documents
-and Downloads, which it needs to find project build folders.
+cannot write there). Built on their own Mac, it opens without the Gatekeeper step.
 
 A Mac with a full disk often cannot `fork` new processes. The app and the installer are
 written to start programs without forking, so they still open in that state.

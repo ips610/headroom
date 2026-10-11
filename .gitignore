@@ -1,4 +1,6 @@
 __pycache__/
 dist/
+build/
+.venv-build/
 .DS_Store
 *.log

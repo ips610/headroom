@@ -32,7 +32,9 @@ def run(command, timeout=None):
 
 HOME = os.path.realpath(os.path.expanduser("~"))
 TMP = os.path.realpath(run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]).stdout.strip() or "/nonexistent")
-HERE = os.path.dirname(os.path.abspath(__file__))
+# Where ui.html sits: beside this file, or inside the bundle when package.sh froze it into an app.
+HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+FROZEN = getattr(sys, "frozen", False)
 TOKEN = secrets.token_urlsafe(24)
 
 MIN_KB = 1024              # a row under 1 MB is not worth a line
@@ -755,11 +757,13 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
-    if "--detach" in sys.argv:
-        # Started by the app in ~/Applications. Hand over to a copy that outlives the launcher,
+    if "--detach" in sys.argv or (FROZEN and "--serve" not in sys.argv):
+        # Started by the app in Applications. Hand over to a copy that outlives the launcher,
         # so the app counts as closed and can be opened again while a tab is still up.
+        child = [sys.executable, "--serve"] if FROZEN else [sys.executable, os.path.abspath(__file__)]
+        child += [arg for arg in sys.argv[1:] if arg == "--no-open"]
         log = os.open(home("Library", "Logs", "headroom.log"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        os.posix_spawn(sys.executable, [sys.executable, os.path.abspath(__file__)], os.environ, setsid=True,
+        os.posix_spawn(child[0], child, os.environ, setsid=True,
                        file_actions=[(os.POSIX_SPAWN_DUP2, log, 1), (os.POSIX_SPAWN_DUP2, log, 2)])
         return
     server = Server(("127.0.0.1", 0), Handler)
