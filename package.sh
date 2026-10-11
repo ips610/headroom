@@ -23,8 +23,10 @@ build() {
     --add-data "$here/ui.html:." --distpath "build/dist-$arch" --workpath "build/work-$arch" \
     --specpath build cleaner.py
   app="build/dist-$arch/headroom.app"
-  # The browser tab is the window, so no Dock icon of its own; same version as install.py.
-  /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" \
+  # The Dock launcher becomes the app's main program and starts the frozen server beside it,
+  # which gives headroom a Dock icon and a Quit. Same version as install.py.
+  launcher/build.sh "$arch" "$app/Contents/MacOS/headroom-app"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable headroom-app" \
     -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
   codesign --force --deep --sign - "$app"
   rm -f "dist/$zip"

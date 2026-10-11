@@ -4,12 +4,15 @@
 Run it again after changing cleaner.py or ui.html: the app holds its own copies.
 """
 import os
+import platform
 import plistlib
 import shutil
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NAME = "headroom"
 
+# Used only when there is no Swift compiler for the Dock launcher in launcher/.
 LAUNCHER = """#!/bin/sh
 # Shell built-ins and exec only, nothing that forks: a Mac that is out of memory cannot fork,
 # and that is when this app gets opened. Finder also starts apps with a bare PATH, and
@@ -30,7 +33,6 @@ INFO = {
     "CFBundlePackageType": "APPL",
     "CFBundleShortVersionString": "1.2",
     "CFBundleIconFile": "icon",
-    "LSUIElement": True,    # the browser tab is the window, so no Dock icon of its own
 }
 
 
@@ -50,12 +52,22 @@ def build(app):
     os.makedirs(os.path.join(contents, "Resources"))
     for name in ("cleaner.py", "ui.html", "icon.icns"):
         shutil.copy(os.path.join(HERE, name), os.path.join(contents, "Resources"))
+    info = dict(INFO)
+    # The Dock launcher gives headroom a Dock icon and a Quit; it is compiled for this Mac's chip.
+    shell = os.path.join(contents, "MacOS", "headroom-app")
+    with tempfile.TemporaryDirectory() as scratch:
+        built = os.path.join(scratch, "headroom-app")
+        if spawn("/bin/sh", os.path.join(HERE, "launcher", "build.sh"), platform.machine(), built):
+            shutil.copy(built, shell)
+            info["CFBundleExecutable"] = "headroom-app"
+    if not os.path.exists(shell):
+        launcher = os.path.join(contents, "MacOS", "headroom")
+        with open(launcher, "w") as script:
+            script.write(LAUNCHER)
+        os.chmod(launcher, 0o755)
+        info["LSUIElement"] = True      # a shell script cannot hold a Dock icon, so show none
     with open(os.path.join(contents, "Info.plist"), "wb") as plist:
-        plistlib.dump(INFO, plist)
-    launcher = os.path.join(contents, "MacOS", "headroom")
-    with open(launcher, "w") as script:
-        script.write(LAUNCHER)
-    os.chmod(launcher, 0o755)
+        plistlib.dump(info, plist)
     # An ad-hoc signature gives macOS one stable name to remember folder permissions against.
     # The app runs without it, so a failure here is not worth stopping for.
     return spawn("/usr/bin/codesign", "--force", "--sign", "-", app)
