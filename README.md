@@ -54,8 +54,8 @@ your browser.
 ### Updating
 
 When you open headroom, it asks GitHub whether there's a newer version, at most once a day. If
-there is, the top bar says "headroom 1.5 is out · Get it". Maintenance → Updates has a **Check
-for updates** button too.
+there is, the top bar says a new version is out, with a **Get it** link. Maintenance → Updates
+has a **Check for updates** button too.
 
 To update, quit headroom (right-click its Dock icon → Quit), download the new zip, unzip it and
 drag headroom into Applications. Click **Replace** when Finder asks. A new download may need
@@ -80,31 +80,47 @@ out of the first line.
 ## Using it
 
 Open headroom and it scans your Mac. The numbers from last time show straight away, greyed
-out, and each section fills in again as it's measured. Tick a whole section or open it to
-pick single items, then hit Delete. A progress bar shows how it's going and you can stop it
-any time. Deleted files don't go to the Trash, so check what you tick.
+out, and each section fills in again as it's measured. Homebrew, Docker and the simulators can
+take a while to answer, so the scan doesn't wait for them: you can already clean, and their rows
+fill in when they're ready. Tick a whole section or open it to pick single items, then hit
+Delete. A progress bar shows how it's going and you can stop it any time. Most of what you delete
+doesn't go to the Trash, so check what you tick. What does go to the Trash, always: iPhone and
+iPad backups, screenshots and screen recordings, archives, model files outside the tools' own
+folders, and models in LM Studio, GPT4All, Jan and an Ollama folder without Ollama (you may have
+put those there yourself). The confirm dialog says for each row where it goes.
+
+If you'd rather have a safety net, turn on **Move cleaned files to the Trash instead of deleting
+them** under Maintenance. Then nothing is deleted for good, and you get the space back when you
+empty the Trash. Rows that only a command can clear (Homebrew, Docker, Ollama, simulators,
+`git gc`) and the Trash itself are greyed out while it's on.
+
+A section that grew a lot since about a week ago says so next to its size, like "+4.2 GB this
+week", so you can see what's eating the disk before it's full.
 
 ![The App caches section opened in light mode, showing each cache with its size and where it lives](docs/screenshots/clean-light.png)
 
 If you just want space back, press **Safe clean**. It picks only what can't hurt: app caches,
-old logs and temp files, and installers you downloaded over a month ago. You still see the
-list before anything goes.
+old logs and temp files, the browser copies automated Chrome leaves behind, and installers you
+downloaded over a month ago. It never picks your own files: no screenshots, models, archives or
+backups. You still see the list before anything goes.
 
 headroom has a Dock icon while it runs. Click it to bring the page back, and right-click it →
 Quit (or ⌘Q) to stop headroom. Closing the tab stops it too.
 
 You can also just type `headroom.localhost` in your browser, even when headroom is closed, and
 it starts. macOS keeps that address free for it, so nothing actually runs until you visit. (If
-Safari searches for it instead, type `headroom.localhost/` once.) The page itself lives on port
-8460; the plain name is a tiny redirect on port 80 that also knows `harbor.localhost`, my other
-app. [Uninstalling](#uninstalling) says how to remove those helpers.
+Safari searches for it instead, type `headroom.localhost/` once.) The page itself lives on a port
+of its own (8460, or the next free one if something else has that); the plain name is a tiny
+redirect on port 80 that also knows `harbor.localhost`, my other app. [Uninstalling](#uninstalling) says how to remove those helpers.
 
 The first scan may ask for access to Desktop, Documents and Downloads. That's how it finds
 `node_modules` and build folders in your projects.
 
 If an app is open, its cache is greyed out until you quit it, because the app would just
 write it back. Build folders you used this week stay unticked when you tick the whole
-section; tick them one by one if you really mean it.
+section; tick them one by one if you really mean it. The same goes for screenshots and models
+added or changed in the last 30 days, model files inside a git project, and Xcode's two newest
+device support versions.
 
 Don't want a row offered again? Hover it and press **Never offer**. It moves to "Never
 offered" at the bottom of the list, where you can bring it back.
@@ -134,15 +150,30 @@ just tells you what it couldn't see.
 | --- | --- |
 | Trash and browser caches | the Trash, and the cache folders of Safari, Chrome, Firefox, Arc, Brave and Edge (never history, logins or cookies) |
 | App caches | everything in `~/Library/Caches`, the cache folders of apps like Slack, VS Code and Notion, caches inside sandboxed apps, Spotify's and Adobe's media caches, qBittorrent's location database |
-| Logs and temporary files | `~/Library/Logs`, qBittorrent's logs, and temp files nobody has touched for a day |
+| Logs and temporary files | `~/Library/Logs`, qBittorrent's logs, temp files nobody has touched for a day, and the copies of itself that Chrome (or Edge, Brave, Chromium) leaves behind every time Selenium, Puppeteer or Playwright starts it, about 1 GB each. A copy a running browser was started from is left alone |
 | Installer files | `.dmg`, `.pkg`, `.iso`, `.xip` and zipped apps in Downloads and on the Desktop, iPhone and iPad updates (`.ipsw`), and `.torrent` files you've already added to qBittorrent or that are over a month old |
-| Developer tool caches | npm, Bun, Gradle, Maven, NuGet, gems, pub, Cargo, rustup, uv, Conda, Deno, Expo, Unity, Arduino, Go modules, Flutter, Xcode DerivedData, old simulators and the caches inside shut-down ones, Docker build cache, Homebrew's old versions and packages nothing needs, old VS Code / Cursor / Windsurf extension versions, `~/.cache` |
+| Developer tool caches | npm, Bun, Gradle, Maven, NuGet, gems, pub, Cargo, rustup, uv, Conda, Deno, Expo, Unity, Arduino, Go modules, Flutter, Xcode DerivedData, previews and device support (the two newest versions of each system stay unticked), old simulators and the caches inside shut-down ones, Docker build cache, Homebrew's old versions and packages nothing needs, old VS Code / Cursor / Windsurf extension versions, `~/.cache`, the datasets Hugging Face downloaded and the code torch.hub downloaded. A project's `.git` folder over 500 MB gets a row that packs it with `git gc` |
 | Project build folders | `node_modules`, `.next`, `dist`, Rust `target`, Swift `.build`, Flutter `build` and `.dart_tool` |
 | Leftovers of deleted apps | settings, caches, saved windows, containers and launch agents of apps that aren't on your Mac any more |
-| Backups, emulators and big downloads | iPhone and iPad backups (these go to the Trash, since one may be your only copy), Android emulators and system images, iOS simulators, Ollama and LM Studio models, unused Docker images, stopped Docker containers and volumes no container uses, Xcode archives, unfinished downloads of torrents you removed from qBittorrent |
+| Backups, emulators and big downloads | iPhone and iPad backups (these go to the Trash, since one may be your only copy), Android emulators and system images, iOS simulators, unused Docker images, stopped Docker containers and volumes no container uses, Xcode archives, unfinished downloads of torrents you removed from qBittorrent |
+| Model weight files | models that Hugging Face, PyTorch, Ollama, LM Studio, GPT4All and Jan downloaded, one row each, and model files of 100 MB or more anywhere else in your home folder (`.gguf`, `.safetensors`, `.pt` and the like). A `.bin` or `.h5` only counts next to a `config.json` or `tokenizer.json`, or in a folder called `models` or `checkpoints`. The same file name in many folders (a training run) is one row |
+| Zip files and other archives | `.zip`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tar.xz`, `.7z` and `.rar` of 20 MB or more, and a plain `.gz`, `.bz2` or `.xz` from 100 MB. The ones with a folder of the same name next to them come first, because they look unzipped already. Zipped apps in Downloads and on the Desktop stay under Installer files, and archives inside a git project aren't listed |
+| Screenshots and screen recordings | the ones macOS itself made, in the folder it saves them to (the Desktop unless you changed it), one row per month, newest first |
 
-The last two aren't really cache. They won't come back on their own, so headroom keeps them
+The last five aren't really cache. They won't come back on their own, so headroom keeps them
 apart and warns you before deleting them.
+
+Some things always go to the Trash and never straight off, whatever the switch says, because
+they're yours or may be: iPhone and iPad backups, screenshots and screen recordings, archives,
+model files outside the tools' own folders (a `.pt` in a project may be a model you trained, and
+nothing can download that again), and models in LM Studio, GPT4All and Jan, which also hold the
+ones you import. Hugging Face models and torch.hub checkpoints are deleted like any cache, since
+those folders only hold downloads.
+
+headroom finds model files and archives by asking Spotlight, so it doesn't walk your disk a
+second time, and then checks every answer itself. If Spotlight doesn't answer, the section says
+so. If it's switched off for the disk, those two sections just stay empty, and screenshots are
+found by their names only, which misses ones macOS named in another language than English.
 
 ## The other tabs
 
@@ -159,10 +190,14 @@ apart and warns you before deleting them.
 - **Maintenance** refreshes Quick Look, flushes DNS, rebuilds the icon cache or the Spotlight
   index. The ones that need your password ask through macOS's own dialog; headroom never
   sees it. Rebuilding Spotlight takes hours, so it asks first.
-- **Maintenance** also holds the two reminders.
+- **Maintenance** also holds the two reminders, and the switch that sends cleaned files to the
+  Trash instead of deleting them. It's off unless you turn it on.
 - **History** shows a chart of free space over time, with a dot wherever headroom freed some,
-  and lists everything it deleted or moved to the Trash, with when, what and where. It's kept
-  in `~/Library/Logs/headroom/history.jsonl`.
+  then what grew since about a week ago (sections and single rows, biggest first), and lists
+  everything it deleted or moved to the Trash, with when, what and where. That list is kept in
+  `~/Library/Logs/headroom/history.jsonl`. For "what grew", headroom keeps the sizes from one
+  scan a day for 30 days. Until it has a scan from an earlier day it says "Not enough history
+  yet", and if the one it compares with isn't about a week old it says how many days it is.
 
 ## What it won't touch
 
@@ -175,12 +210,34 @@ With qBittorrent, it never touches your list of torrents, its settings or anythi
 downloading, only the half-downloaded pieces of torrents that aren't in the list any more, and
 nothing of it while qBittorrent is open.
 
+A picture you named `screenshot.png` yourself isn't a screenshot to headroom: it only lists
+files macOS marked as screen captures or named the way macOS names them, date and time included,
+and only in the one folder macOS saves them to, never its subfolders. For model files and
+archives it skips `~/Library`, anything inside an app or the Photos library, `node_modules`,
+`.git` and other hidden folders, virtualenvs, conda and Flutter installs, and files that are only
+in iCloud. It never opens an archive to look inside.
+
+In a git repository it never deletes anything itself. It runs `git gc` and tells you how big
+`.git` was before and after. Commits you can reach stay; git may remove unreachable ones older
+than its grace period (two weeks, unless the repository says otherwise). It won't run that while
+a rebase, merge, cherry-pick or bisect is half done or git holds a lock, nor in a partial clone or
+a repository that shares its objects with another. And git never gets to run a program the
+repository names: no hooks, no file-system monitor.
+
+Next to Hugging Face's downloads, only what is known to be a download is offered. Your login and
+whatever other tools keep in that folder stay. A browser copy that a running browser was started
+from stays too.
+
 ## Is it safe?
 
 I was careful here because it deletes things. The page never sends file paths to the app, only
 the ids of rows it was shown, and the app only deletes what its own scan found. On top of that
 it refuses anything outside your home folder or reached through a symlink, and only moves apps
-to the Trash, never deletes them.
+to the Trash, never deletes them. The one exception outside the home and temp folders is the
+browser copies automated Chrome leaves next to the temp folder, and there it accepts those
+folders and nothing else. A symlink is never handed to Finder, because Finder would move what
+it points at. With the Move to Trash switch on, headroom doesn't run `rm` at all, and if it
+can't read its own settings it refuses to delete instead of guessing how the switch was set.
 
 It only listens on this Mac (`127.0.0.1` and `::1`), and the page only works in a browser
 headroom has signed in, so no website can talk to it. Being signed in takes two things: a
@@ -211,6 +268,15 @@ Without it, the app gets a throwaway signature and macOS asks again after every 
 `SIGN_ID` to use a different certificate. `./run.sh` starts it straight from the folder, and
 `python3 test_cleaner.py` runs the tests. They use a fake home folder and stand in for Finder,
 so nothing real gets deleted or moved.
+
+Measuring folders used to be the slow part, because `du` asks about one file at a time. So the
+app carries a small program of its own, `headroom-size` (`launcher/size.swift`), that reads a
+whole folder at once and works on several folders in parallel. It prints the same numbers as
+`du -sk`, several times faster on big build folders. `install.py` builds it when there's a
+Swift compiler, next to the Dock launcher. Without one, or from `./run.sh`, headroom just uses
+`du`, and it also falls back to `du` for any folder the measurer isn't sure about. To try it from
+source, build it with `launcher/build.sh` and point `HEADROOM_SIZE` at it. Only an app bundle's
+own copy is used otherwise.
 
 `./package.sh` makes the two zips for the Releases page, and `SHA256SUMS` to upload beside them.
 It needs the python.org Python 3.11, a clean git tree and my certificate in the keychain

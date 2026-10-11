@@ -10,6 +10,7 @@ import http.client
 import io
 import json
 import os
+import platform
 import plistlib
 import re
 import shutil
@@ -31,6 +32,7 @@ cleaner.SYSTEM_APPLICATIONS = os.path.join(box, "System", "Applications")
 cleaner.TOOL_DIRS = [os.path.join(box, "bin")]
 cleaner.PORTS = []                  # a random port, so the real headroom keeps 8460
 cleaner.MIN_KB, cleaner.SMALL_KB, cleaner.BUILD_MIN_KB = 8, 64, 64
+cleaner.SIZER = None                # du measures here, and a made-up measurer where a test says so
 outside = os.path.join(box, "outside")
 spawn = cleaner.run
 
@@ -94,18 +96,23 @@ def agent(label, program):
 class Recorder:
     """Stands in for run(): records what would reach Finder, Spotlight, launchctl, Homebrew, Docker
     or an admin prompt, and passes harmless programs (du, ps, git, rm inside the test folder) through.
-    `answer(command)` gives a recorded command's (returncode, output); `fakes` are fake programs."""
-    def __init__(self, returncode=0, stderr="", answer=None, fakes=()):
+    `answer(command)` gives a recorded command's (returncode, output); `fakes` are fake programs;
+    `never` are programs that must not be started at all."""
+    def __init__(self, returncode=0, stderr="", answer=None, fakes=(), never=()):
         self.calls, self.returncode, self.stderr, self.answer, self.fakes = [], returncode, stderr, answer, fakes
         self.inputs = []        # what each recorded command was given to read
+        self.never = never
 
     def __call__(self, command, timeout=None, input=None):
         assert not any("?k=" in str(part) for part in command), command
+        assert command[0] not in self.never, command
         if command[0] in ("/usr/bin/osascript", "/usr/bin/open", "/usr/bin/qlmanage", "/usr/bin/mdls",
                           "/bin/launchctl", "/usr/bin/env") + tuple(self.fakes):
             self.calls.append(command)
             self.inputs.append(input)
             code, out = self.answer(command) if self.answer else (self.returncode, "")
+            if command[:3] == ["/usr/bin/osascript", "-e", cleaner.TRASH_SCRIPT] and not code and not out:
+                out = "0\n" * len(command[3:])       # Finder: every one of them moved
             return subprocess.CompletedProcess(command, code, out, self.stderr)
         assert command[0] in ("/usr/bin/du", "/bin/ps", "/bin/rm") or command[0].endswith("/git"), command
         return real_run(command, timeout, input)
@@ -303,7 +310,7 @@ try:
     assert sorted(big) == [
         "Android NDK 26.3.1", "Android emulator Pixel 3a",
         "Android system image android-33 (google_apis, arm64-v8a)",
-        "LM Studio model Qwen-9B-GGUF", "Xcode archive Runner 30-07-26, 14.06"], sorted(big)
+        "Xcode archive Runner 30-07-26, 14.06"], (sorted(big), "models have a section of their own")
     assert all(row["group"] == "big" for row in big.values())
     assert sorted(os.path.basename(p) for p in big["Android emulator Pixel 3a"]["paths"]) == [
         "Pixel_3a.avd", "Pixel_3a.ini"]
@@ -559,6 +566,11 @@ try:
     RUNNING[0] = ""
     assert out["errors"] == ["Quit it first"] and os.path.exists(caches["big"]["paths"][0]), out
 
+    # By the calendar, a minute before midnight was yesterday, however few hours ago that is.
+    midnight = time.mktime(datetime.date.today().timetuple())
+    assert cleaner.ago(midnight - 60, calendar=True) == "yesterday" and cleaner.ago(midnight + 1, calendar=True) == "today"
+    assert cleaner.ago(time.time() - 3600) == "today" and cleaner.sentence("Too many open files") == "Too many open files."
+    assert cleaner.sentence("Done.") == "Done." and cleaner.sentence("") == ""
     assert cleaner.size_kb("4.97GB (32%)") == int(4.97e9 / 1024)
     assert cleaner.size_kb("0B") == 0
 
@@ -572,7 +584,7 @@ try:
     with recording(Recorder()) as recorder:
         assert cleaner.finder_trash(keeper_pref) == ""
     assert recorder.calls == [["/usr/bin/osascript", "-e", cleaner.TRASH_SCRIPT, keeper_pref]], recorder.calls
-    assert 'delete target' in cleaner.TRASH_SCRIPT and keeper_pref not in cleaner.TRASH_SCRIPT
+    assert 'delete theItem' in cleaner.TRASH_SCRIPT and keeper_pref not in cleaner.TRASH_SCRIPT
     with recording(Recorder(1, "execution error: User canceled. (-128)")):
         assert cleaner.finder_trash(keeper_pref) == "You cancelled, so it stayed."
 
@@ -766,8 +778,9 @@ try:
     assert recorder.calls == [[docker, "rm", "8a83ec757c0c"], [docker, "volume", "rm", "old_pgdata"]], recorder.calls
     docker_up[0] = False
     with recording(Recorder(answer=docker_says, fakes=[docker])):
-        rows = cleaner.scan_docker()
+        rows, unsure = cleaner.scan_docker()
     assert [r["blocked"] for r in rows] == ["Start Docker to measure this"] * 2, "Docker off: no leftovers listed"
+    assert isinstance(unsure, cleaner.Unsure) and unsure == "", "and \"What grew\" is told nothing was measured"
 
     # --- duplicate files --------------------------------------------------------------------------
     content = os.urandom(2 * 1024 * 1024)
@@ -880,7 +893,8 @@ try:
     cleaner.startup_dirs = real_dirs
 
     # --- reminders: the agent's check, with a stand-in for statfs ---------------------------------
-    assert cleaner.settings() == {"alert": True, "weekly": True, "alert_gb": 20}, "on by default, below 20 GB"
+    assert cleaner.settings() == {"alert": True, "weekly": True, "alert_gb": 20, "trash": False}, \
+        "reminders on by default, below 20 GB; Move to Trash off"
     free = [12e9 / 1024]
     cleaner.disk_free_kb = lambda: int(free[0])
     measured = [3.2e9 / 1024]
@@ -941,6 +955,979 @@ try:
     # --- space history: deletes close together are one mark ---------------------------------------
     marks = cleaner.space_history()["marks"]
     assert marks and all(kb > 0 and n >= 1 for _, kb, n in marks), marks
+
+    # --- Xcode: device support by age, previews, and nothing listed twice ---------------------------
+    xcode = os.path.join(cleaner.HOME, "Library", "Developer", "Xcode")
+    for name in ("iPhone14,2 15.7 (19H12)", "16.4 (20E247)", "iPhone15,2 17.4.1 (21E236)", "iPad13,4 17.4.1 (21E236)",
+                 "iPhone16,1 18.0 (22A3354)"):
+        put("iOS DeviceSupport", name, "Symbols", "dyld", root=xcode)
+    put("watchOS DeviceSupport", "Watch6,1 9.4 (20T253)", "Symbols", "dyld", root=xcode)
+    put("UserData", "Previews", "Simulator Devices", "ABCD", "data", root=xcode)
+    xcode_theme = put("UserData", "FontAndColorThemes", "mine.xccolortheme", kb=1, root=xcode)
+    put("Library", "Developer", "CoreSimulator", "Caches", "dyld", "x")
+    assert cleaner.support_version("iPhone15,2 17.4.1 (21E236)") == (17, 4, 1) and cleaner.support_version("odd") == ()
+    dev = named(cleaner.scan_dev_tools())
+    old_support, new_support = dev["Old iOS device support"], dev["Newest iOS device support"]
+    assert sorted(os.path.basename(p) for p in old_support["paths"]) == ["16.4 (20E247)", "iPhone14,2 15.7 (19H12)"]
+    assert sorted(os.path.basename(p) for p in new_support["paths"]) == [
+        "iPad13,4 17.4.1 (21E236)", "iPhone15,2 17.4.1 (21E236)", "iPhone16,1 18.0 (22A3354)"], "the two newest versions"
+    assert new_support["recent"] and "leaves it out" in new_support["note"] and not old_support["recent"]
+    assert "copies them again" in old_support["detail"] and "iOS DeviceSupport" in old_support["detail"]
+    assert "Old watchOS device support" not in dev and dev["Newest watchOS device support"]["recent"], "one version: in use"
+    assert "Xcode device support files" not in dev, "the one row for all of it is gone"
+    previews = dev["Xcode previews"]
+    assert [os.path.basename(p) for p in previews["paths"]] == ["Simulator Devices"] and "open a preview" in previews["detail"]
+    assert cleaner.blocked(previews, "/Applications/Xcode.app/Contents/MacOS/Xcode\n") == "Quit Xcode first"
+    assert "Simulator caches" in dev and not any("rchive" in name for name in dev), "archives are rows under Backups already"
+    assert sum(name.startswith("Xcode archive") for name in named(cleaner.scan_big())) == 1
+    assert cleaner.delete(old_support)["errors"] == []
+    assert sorted(os.listdir(os.path.join(xcode, "iOS DeviceSupport"))) == sorted(os.path.basename(p) for p in new_support["paths"])
+    assert os.path.exists(xcode_theme), "Xcode's own settings stay"
+
+    # --- big .git folders: one `git gc`, never in the middle of a rebase, nothing removed by headroom --
+    if GIT:
+        cleaner.GIT_MIN_KB = 300        # a new repository's .git is about 100 KB of sample hooks
+        heavy = os.path.join(cleaner.HOME, "Desktop", "heavy")
+        put("Desktop", "heavy", "package.json", kb=1)
+        put("Desktop", "heavy", "node_modules", "dep", "index.js")
+        real_run([GIT, "init", "-q", heavy])
+        for n in range(6):
+            put("Desktop", "heavy", "assets", f"blob{n}.bin", kb=100)
+        real_run([GIT, "-C", heavy, "add", "assets"])
+        dangling = real_run([GIT, "-C", heavy, "hash-object", os.path.join(heavy, "assets", "blob0.bin")]).stdout.strip()
+        real_run([GIT, "-C", heavy, "rm", "-r", "-q", "--cached", "assets"])       # nothing points at them now
+        store = os.path.join(heavy, ".git")
+        found = [row for row in cleaner.scan_builds()[0] if row["git"]]
+        assert [row["name"] for row in found] == ["heavy git history"], "only a .git that is big"
+        packing = found[0]
+        safe_git = ["/usr/bin/env", "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1", GIT,
+                    "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.ext.allow=never", "-C", heavy]
+        assert packing["cmd"] == safe_git + ["gc", "--quiet"] and packing["group"] == "dev", packing["cmd"]
+        assert not any("prune" in part for part in packing["cmd"]), "the repository's own grace period for pruning stands"
+        assert packing["paths"] == [] and packing["kb"] == 0, "no path for headroom to remove, and no made-up saving"
+        assert "/usr/bin/git" != GIT and ".git folder" in packing["detail"] and cleaner.GC_KEEPS in packing["detail"]
+        shown = cleaner.public(packing, "")
+        assert shown["action"] == "git gc" and shown["kb"] == 0 and shown["blocked"] == "" and not shown["safe"]
+        assert shown["weighs"] >= 300, "sorted by how big .git is, since it has no size of its own"
+        assert "dev" in cleaner.SOURCES["builds"][0]
+        gc_ran = lambda recorder: [call for call in recorder.calls if "gc" in call]
+        for busy, word in (("rebase-merge", "rebase"), ("rebase-apply", "rebase"), ("MERGE_HEAD", "merge"),
+                           ("index.lock", "lock"), ("gc.pid", "lock"), (os.path.join("worktrees", "wt", "rebase-merge"), "rebase"),
+                           (os.path.join("refs", "heads", "main.lock"), "lock"), ("commondir", "shares")):
+            os.makedirs(os.path.join(store, busy))
+            assert word in cleaner.blocked(packing, ""), busy
+            with recording(Recorder(never=("/bin/rm",))) as recorder:
+                out = cleaner.delete(packing)
+            assert recorder.calls == [] and word in out["errors"][0], (busy, "git must not be started at all", recorder.calls)
+            shutil.rmtree(os.path.join(store, busy.split(os.sep)[0]) if busy.split(os.sep)[0] != "refs"
+                          else os.path.join(store, busy))
+        # A stray file among the linked worktrees is not a worktree, and blocks nothing.
+        put("worktrees", "notes.txt", kb=1, root=store)
+        assert cleaner.blocked(packing, "") == "", cleaner.blocked(packing, "")
+        shutil.rmtree(os.path.join(store, "worktrees"))
+        # Objects or refs kept somewhere else: packing here could strand the other repository.
+        os.rename(os.path.join(store, "refs"), os.path.join(store, "refs-real"))
+        os.symlink(os.path.join(store, "refs-real"), os.path.join(store, "refs"))
+        assert "shares" in cleaner.blocked(packing, "")
+        os.remove(os.path.join(store, "refs"))
+        os.rename(os.path.join(store, "refs-real"), os.path.join(store, "refs"))
+        # A program the repository names for gc, and a clone that would fetch what it lacks: refused.
+        for setting, word in (("gc.recentObjectsHook", "program of its own"), ("extensions.partialClone", "partial clone"),
+                              ("remote.origin.promisor", "partial clone")):
+            real_run([GIT, "-C", heavy, "config", setting, "true"])
+            assert word in cleaner.blocked(packing, ""), setting
+
+            def settings_for_real(command):         # reading them runs nothing; anything else is only recorded
+                done = real_run(command) if "config" in command else None
+                return (done.returncode, done.stdout) if done else (0, "")
+            with recording(Recorder(answer=settings_for_real, never=("/bin/rm",))) as recorder:
+                out = cleaner.delete(packing)
+            assert gc_ran(recorder) == [] and word in out["errors"][0], "the settings are read, gc is not run"
+            real_run([GIT, "-C", heavy, "config", "--unset", setting])
+        assert cleaner.blocked(packing, "") == ""
+        with recording(Recorder(never=("/bin/rm",))) as recorder:
+            assert "Move to Trash is on" in cleaner.delete(packing, to_trash=True)["errors"][0]
+        assert gc_ran(recorder) == [], "a command can't go to the Trash, so it doesn't run in that mode"
+        with recording(Recorder(never=("/bin/rm",))) as recorder:
+            assert cleaner.delete(packing)["errors"] == []
+        assert gc_ran(recorder) == [packing["cmd"]], "one gc, and nothing else touches .git"
+        assert all(call[:len(safe_git)] == safe_git for call in recorder.calls), "every git call goes the guarded way"
+        # A .git that is a link, or the file a linked worktree has, is never handed to git.
+        os.rename(store, store + "-real")
+        os.symlink(store + "-real", store)
+        assert "leaves it alone" in cleaner.git_busy(heavy) and not [r for r in cleaner.scan_builds()[0] if r["git"]]
+        os.remove(store)
+        os.rename(store + "-real", store)
+        # For real. An object nothing points at is younger than git's grace period, so it stays:
+        # headroom does not tell git to prune now.
+        cleaner.JOB.update(results=[], done_kb=0)
+        cleaner.run_job([packing])
+        done = cleaner.JOB["results"][0]
+        assert done["errors"] == [] and not done["trashed"], done
+        assert re.fullmatch(r"\.git was \d+ KB and is \d+ KB now\.", done["note"]), done["note"]
+        assert real_run([GIT, "-C", heavy, "cat-file", "-e", dangling]).returncode == 0, "inside the grace period: kept"
+        entry = cleaner.history()[0]
+        assert entry["result"] == "compacted" and entry["note"] == done["note"] and entry["paths"] == [], entry
+        assert entry["command"] == "git -C ~/Desktop/heavy gc", entry["command"]
+        # When the repository itself says to prune at once, git does, and the result says what that freed.
+        real_run([GIT, "-C", heavy, "config", "gc.pruneExpire", "now"])
+        cleaner.JOB.update(results=[], done_kb=0)
+        cleaner.run_job([packing])
+        done = cleaner.JOB["results"][0]
+        assert done["errors"] == [] and done["freed_kb"] >= 500, done
+        assert os.path.isfile(os.path.join(store, "HEAD")) and os.path.exists(os.path.join(heavy, "assets", "blob0.bin"))
+
+        # Two repositories with one folder name are two rows, each said with its parent.
+        for parent in ("one", "two"):
+            twin = os.path.join(cleaner.HOME, "Documents", parent, "app")
+            put("Documents", parent, "app", "package.json", kb=1)
+            put("Documents", parent, "app", "node_modules", "dep", "index.js")
+            real_run([GIT, "init", "-q", twin])
+            put("Documents", parent, "app", ".git", "padding", kb=400)
+        twins = [row for row in cleaner.scan_builds()[0] if row["git"] and row["name"].endswith("app git history")]
+        assert sorted(row["name"] for row in twins) == ["one/app git history", "two/app git history"], [r["name"] for r in twins]
+        assert len({row["id"] for row in twins}) == 2 and len({row["cmd"][-3] for row in twins}) == 2, "one id each"
+        for parent in ("one", "two"):
+            shutil.rmtree(os.path.join(cleaner.HOME, "Documents", parent))
+
+        # A repository that names programs for git to run: an unpacked download can hold a ready-made
+        # .git. Neither the scan (git ls-files) nor git gc starts any of them.
+        marks = os.path.join(box, "marks")
+        os.makedirs(marks)
+        crafted = os.path.join(cleaner.HOME, "Downloads", "crafted")
+        put("Downloads", "crafted", "package.json", kb=1)
+        put("Downloads", "crafted", "node_modules", "dep", "index.js")
+        put("Downloads", "crafted", "a.txt", kb=1)
+        real_run([GIT, "init", "-q", crafted])
+        real_run([GIT, "-C", crafted, "add", "a.txt"])
+        real_run([GIT, "-C", crafted, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"])
+        real_run([GIT, "-C", crafted, "update-index", "--fsmonitor"])
+        put("Downloads", "crafted", ".git", "padding", kb=400)
+        for name in ("fsmonitor.sh", os.path.join("hooks", "reference-transaction"), os.path.join("hooks", "pre-auto-gc")):
+            script = os.path.join(crafted, ".git", name)
+            with open(script, "w") as handle:
+                handle.write(f"#!/bin/sh\necho ran >> '{marks}/{os.path.basename(name)}'\n")
+            os.chmod(script, 0o755)
+        with open(os.path.join(crafted, ".git", "config"), "a") as handle:
+            handle.write(f"[core]\n\tfsmonitor = {os.path.join(crafted, '.git', 'fsmonitor.sh')}\n")
+        rows = [row for row in cleaner.scan_builds()[0] if row["git"] == crafted]
+        assert len(rows) == 1 and os.listdir(marks) == [], ("the scan ran a program the repository named", os.listdir(marks))
+        cleaner.JOB.update(results=[], done_kb=0)
+        cleaner.run_job(rows)
+        assert cleaner.JOB["results"][0]["errors"] == [] and os.listdir(marks) == [], \
+            ("git gc ran a program the repository named", os.listdir(marks), cleaner.JOB["results"])
+        shutil.rmtree(crafted)
+
+    # --- screenshots and screen recordings: only macOS's own, only in its one folder ----------------
+    desktop = os.path.join(cleaner.HOME, "Desktop")
+    month = lambda days: time.strftime("%B %Y", time.localtime(time.time() - days * cleaner.DAY))
+
+    def shot(name, days, folder=desktop, kb=40):
+        made = put(name, kb=kb, root=folder)
+        age(made, days)
+        return made
+    old_shots = [shot("Screenshot 2026-08-14 at 10.32.11.png", 45), shot("Screenshot 2026-08-14 at 10.32.11 AM (2).png", 45),
+                 shot("Screen Shot 2020-01-01 at 10.00.00 AM.png", 45)]
+    older_shot = shot("Screenshot 2026-06-01 at 08.00.00.jpg", 100)
+    new_shot = shot("Screenshot 2026-10-10 at 09.15.00.png", 2)
+    old_clip = shot("Screen Recording 2026-08-14 at 11.00.00.mov", 45, kb=300)
+    renamed = shot("invoice proof.png", 45)                                   # only the metadata flag says so
+    custom = shot("Capture 2026-08-14 at 10.32.11.png", 45)                   # the name set in macOS's settings
+    not_shots = [shot("holiday.png", 45), shot("screenshot.png", 45), shot("Screenshot of the plan.png", 45),
+                 shot("Screenshot 2026-08-14 at 10.32.11.txt", 45), shot("notes.mov", 45),
+                 shot("Screenshot 2026-08-14 at 10.32.12.png", 45, folder=os.path.join(desktop, "kept")),   # a subfolder
+                 shot("Screenshot 2026-08-14 at 10.32.11.png", 45, folder=os.path.join(cleaner.HOME, "Documents")),
+                 put("Screenshot 2026-08-14 at 10.32.13.png", "inside.png", kb=40, root=desktop)]          # a folder
+    os.symlink(kept_outside, os.path.join(desktop, "Screenshot 2026-08-14 at 10.32.14.png"))               # a link out
+    cloud_shot = shot("Screenshot 2026-08-14 at 10.32.15.png", 45)                                         # only in iCloud
+    not_shots.append(cloud_shot)
+    earlier_dataless, placeholders = cleaner.dataless, {os.stat(cloud_shot).st_ino}
+    cleaner.dataless = lambda info: info.st_ino in placeholders         # stands in for SF_DATALESS, which only iCloud sets
+    chosen, flagged, garbled = {}, {renamed}, []
+
+    def capture_says(command):
+        if command[0] == "/usr/bin/defaults":
+            assert command[1:3] == ["read", "com.apple.screencapture"], command
+            return (0, chosen[command[3]] + "\n") if command[3] in chosen else (1, "")
+        if command[0] == "/usr/bin/mdls":
+            if garbled:
+                return 0, "1\0" * (len(command) - 3)      # more answers than files
+            return 0, "\0".join("1" if p in flagged else "(null)" for p in command[4:])
+        return 0, ""
+
+    def scan_shots():
+        with recording(Recorder(answer=capture_says, fakes=["/usr/bin/defaults"], never=("/bin/rm",))) as recorder:
+            rows, notice = cleaner.scan_screenshots()
+        return named(rows), notice, recorder
+    shots, notice, recorder = scan_shots()
+    assert sorted(shots) == sorted([f"Screenshots from {month(45)}", f"Screenshots from {month(100)}",
+                                    "Screenshots from the last 30 days", f"Screen recordings from {month(45)}"]), sorted(shots)
+    assert notice == "" and sorted(shots[f"Screenshots from {month(45)}"]["paths"]) == sorted(old_shots + [renamed])
+    assert shots[f"Screenshots from {month(100)}"]["paths"] == [older_shot]
+    assert shots[f"Screen recordings from {month(45)}"]["paths"] == [old_clip], "recordings get their own rows"
+    assert shots[f"Screenshots from {month(45)}"]["detail"] == "4 files · ~/Desktop"
+    recent = shots["Screenshots from the last 30 days"]
+    assert recent["paths"] == [new_shot] and recent["recent"] and "leaves it out" in recent["note"]
+    offered = {p for row in shots.values() for p in row["paths"]}
+    assert custom not in offered and not offered & set(not_shots), "nothing a person named, nothing outside the folder"
+    assert not any(os.path.islink(p) or os.path.isdir(p) for p in offered)
+    for row in shots.values():
+        assert row["group"] == "shots" and row["trash"] and not row["cmd"], row
+        assert not cleaner.public(row, "")["safe"], "Safe clean never picks them"
+        assert row["recent"] == (row is recent) and (row["note"] == "") == (row is not recent), "the blurb says where they go"
+    # Newest first: the last 30 days, then month by month, a month's recordings beside its screenshots.
+    ranked = sorted(shots.values(), key=lambda row: -cleaner.public(row, "")["rank"])
+    assert ranked[0] is recent and ranked[-1]["name"] == f"Screenshots from {month(100)}", [row["name"] for row in ranked]
+    assert shots[f"Screen recordings from {month(45)}"]["rank"] == shots[f"Screenshots from {month(45)}"]["rank"]
+    assert "screenshots" not in cleaner.SAFE_SOURCES and "shots" not in cleaner.SAFE_GROUPS
+    asked = [p for call in recorder.calls if call[0] == "/usr/bin/mdls" for p in call[4:]]
+    assert asked and all(os.path.dirname(p) == desktop for p in asked), "Spotlight is asked about that folder's files only"
+    # They always go to the Trash through Finder, whatever the Move to Trash switch says.
+    with recording(Recorder(never=("/bin/rm",))) as recorder:
+        out = cleaner.delete(shots[f"Screenshots from {month(100)}"])
+    assert recorder.calls == [["/usr/bin/osascript", "-e", cleaner.TRASH_SCRIPT, older_shot]] and out["errors"] == []
+    assert os.path.exists(older_shot), "the recorder stood in for Finder"
+    # Only the very files the scan looked at: one that has since become a link or a folder stays.
+    swapped = shots[f"Screenshots from {month(45)}"]
+    os.rename(old_shots[0], old_shots[0] + ".aside")
+    os.symlink(kept_outside, old_shots[0])
+    os.rename(old_shots[1], old_shots[1] + ".aside")
+    os.makedirs(old_shots[1])
+    with recording(Recorder(never=("/bin/rm",))) as recorder:
+        out = cleaner.delete(swapped)
+    assert recorder.calls == [["/usr/bin/osascript", "-e", cleaner.TRASH_SCRIPT] + sorted([old_shots[2], renamed])], recorder.calls
+    assert len(out["errors"]) == 2 and all("not what the scan found" in why for why in out["errors"]), out
+    os.remove(old_shots[0])
+    os.rmdir(old_shots[1])
+    for moved in old_shots[:2]:
+        os.rename(moved + ".aside", moved)
+    # The name chosen in macOS's settings counts once it is set there.
+    chosen["name"] = "Capture"
+    assert custom in {p for row in scan_shots()[0].values() for p in row["paths"]}
+    del chosen["name"]
+    # Spotlight answering with anything but one answer per file: nothing it says is used, names decide.
+    garbled.append(True)
+    rows, notice, _ = scan_shots()
+    offered = {p for row in rows.values() for p in row["paths"]}
+    garbled.clear()
+    assert renamed not in offered and not offered & set(not_shots) and set(old_shots) <= offered
+    assert "went by their names" in notice and "another language" in notice, notice
+    # The same when Spotlight knows nothing at all about files that are named like screenshots.
+    flagged.clear()
+    assert "went by their names" in scan_shots()[1]
+    flagged.add(renamed)
+    # Another folder chosen in macOS's settings: only that one is looked at.
+    elsewhere = shot("Screenshot 2026-08-14 at 10.32.11.png", 45, folder=os.path.join(cleaner.HOME, "Pictures", "Shots"))
+    chosen["location"] = "~/Pictures/Shots"
+    assert {p for row in scan_shots()[0].values() for p in row["paths"]} == {elsewhere}
+    # A folder outside the home folder, or reached through a link, is left alone and said so.
+    shot("Screenshot 2026-08-14 at 10.32.11.png", 45, folder=outside)
+    for place in (outside, os.path.join(desktop, "way-out"), cleaner.HOME):
+        chosen["location"] = place
+        rows, notice, recorder = scan_shots()
+        assert rows == {} and "leaves them alone" in notice, place
+        assert not any(call[0] == "/usr/bin/mdls" for call in recorder.calls), place
+    del chosen["location"]
+
+    # --- Move cleaned files to the Trash: Finder moves every path, and nothing is removed for good --
+    switch_paths = [os.path.dirname(put("Library", "Caches", "com.switch.one", "blob", kb=100)),
+                    os.path.dirname(put("Library", "Caches", "com.switch.two", "blob", kb=100))]
+    switch_link = os.path.join(cleaner.HOME, "Library", "Caches", "com.switch.link")
+    os.symlink(os.path.join(outside, "precious"), switch_link)
+    switched = cleaner.item("apps", "switch cache", switch_paths + [switch_link], 200)
+    finder = ["/usr/bin/osascript", "-e", cleaner.TRASH_SCRIPT]
+    assert cleaner.public(switched, "", True)["blocked"] == "" and not switched["trash"]
+    with recording(Recorder(never=("/bin/rm",))) as recorder:
+        out = cleaner.delete(switched, to_trash=True)
+    assert recorder.calls == [finder + switch_paths], ("one call to Finder for the row, not one a path", recorder.calls)
+    assert out["errors"] == [], "a link among them is left where it is, without failing the row every time"
+    assert all(os.path.exists(p) for p in switch_paths) and os.path.islink(switch_link) and os.path.exists(kept_outside)
+    with recording(Recorder(never=("/bin/rm",))) as recorder:
+        assert "is a link" in cleaner.finder_trash(switch_link) and recorder.calls == [], "never handed to Finder, which follows it"
+        assert "is a link" in cleaner.finder_trash_many(switch_paths + [switch_link])[switch_link]
+    assert recorder.calls == [finder + switch_paths]
+    # A hundred paths to a call, an answer for each: 0 when it moved, else Finder's error number.
+    many = [os.path.join(cleaner.HOME, "Library", "Caches", "com.switch.many", f"f{n:03}") for n in range(230)]
+    with recording(Recorder(never=("/bin/rm",))) as recorder:
+        whys = cleaner.finder_trash_many(many[:3])
+        assert cleaner.delete(cleaner.item("apps", "many", many, 100), to_trash=True)["errors"] == []
+    assert whys == dict.fromkeys(many[:3], "") and [len(call) - 3 for call in recorder.calls] == [3, 100, 100, 30]
+    assert [p for call in recorder.calls[1:] for p in call[3:]] == many
+    for said, expected in (("0\n-128\n0\n", ["", "You cancelled, so it stayed.", ""]),
+                           ("0\n-1700\n-10010\n", ["", "It was already gone.", "Finder could not move it (error -10010)."]),
+                           ("0\n0\n", ["Finder could not move it."] * 3),            # not an answer for each: none is believed
+                           ("", ["Finder could not move it."] * 3)):
+        with recording(Recorder(answer=lambda command, said=said: (0, said or "\n"), never=("/bin/rm",))):
+            assert list(cleaner.finder_trash_many(many[:3]).values()) == expected, said
+    with recording(Recorder(1, "execution error: boom (-99)", never=("/bin/rm",))):
+        assert list(cleaner.finder_trash_many(many[:2]).values()) == ["execution error: boom (-99)."] * 2, "said for every path"
+    # What Finder may not move fails with a reason. It is never removed some other way.
+    stray = cleaner.item("apps", "stray", [os.path.join(outside, "precious")], 100)
+    with recording(Recorder(never=("/bin/rm",))) as recorder:
+        out = cleaner.delete(stray, to_trash=True)
+    assert recorder.calls == [] and "outside the folders" in out["errors"][0] and os.path.exists(kept_outside)
+    with recording(Recorder(1, "execution error: Not authorized to send Apple events to Finder. (-1743)",
+                            never=("/bin/rm",))) as recorder:
+        out = cleaner.delete(cleaner.item("apps", "many", many, 100), to_trash=True)
+    assert out["errors"] == [cleaner.NOT_ALLOWED] and len(recorder.calls) == 1, "asked once, not batch after batch"
+    assert "isn't allowed" in cleaner.NOT_ALLOWED and all(os.path.exists(p) for p in switch_paths)
+    # Stop is asked between batches, before the next one: a row that had gone already is not "partly".
+    cleaner.JOB["stopping"] = True
+    with recording(Recorder(never=("/bin/rm",))) as recorder:
+        whole = cleaner.delete(switched, to_trash=True)
+        cut_short = cleaner.delete(cleaner.item("apps", "many", many, 100), to_trash=True)
+    cleaner.JOB["stopping"] = False
+    assert whole["errors"] == [] and cut_short["errors"] == ["Stopped before all of it was moved."], (whole, cut_short)
+    assert [len(call) - 3 for call in recorder.calls] == [2, 100], "the batch under way finishes, the next never starts"
+    # Rows only a command can clear, and the Trash itself, stay put while the switch is on.
+    put(".Trash", "junk.bin", kb=100)
+    in_trash = named(cleaner.scan_trash()[0])["Trash"]
+    for row, why in ((old_versions, "Can't go to the Trash"), (in_trash, "It is the Trash already")):
+        assert why in cleaner.public(row, "", True)["blocked"] and cleaner.public(row, "")["blocked"] == ""
+        assert "while Move to Trash is on" in cleaner.public(row, "", True)["blocked"]
+        with recording(Recorder(never=("/bin/rm",))) as recorder:
+            out = cleaner.delete(row, to_trash=True)
+        assert recorder.calls == [] and why in out["errors"][0] and out["freed_kb"] == 0, (row["name"], recorder.calls)
+    assert os.path.exists(os.path.join(cleaner.HOME, ".Trash", "junk.bin"))
+    # The job records it as moved, and a row that could not go as failed.
+    with recording(Recorder(never=("/bin/rm",))):
+        cleaner.JOB.update(results=[], done_kb=0)
+        cleaner.run_job([cleaner.item("apps", "switch one", switch_paths[:1], 100), old_versions], True)
+    assert [r["trashed"] for r in cleaner.JOB["results"]] == [True, True]
+    assert [e["result"] for e in cleaner.history()[:2]] == ["failed", "trashed"], cleaner.history()[:2]
+    # Off, the same row is removed as before.
+    assert cleaner.delete(cleaner.item("apps", "switch one", switch_paths[:1], 100))["errors"] == []
+    assert not os.path.exists(switch_paths[0]) and os.path.exists(switch_paths[1])
+    # The switch is a file. One that is there but can't be read says nothing about where things
+    # should go, and the page's API refuses to delete on a guess (further down, over HTTP).
+    settings_file = os.path.join(cleaner.state_dir(), "settings.json")
+    was = open(settings_file).read()
+    assert not cleaner.settings_broken()
+    for broken in ("{", "[]", '{"trash": "yes"}', ""):
+        with open(settings_file, "w") as handle:
+            handle.write(broken)
+        assert cleaner.settings_broken(), broken
+    with open(settings_file, "w") as handle:
+        handle.write(was)
+    os.rename(settings_file, settings_file + ".aside")
+    assert not cleaner.settings_broken(), "no file at all is the first launch: the switch is off"
+    os.rename(settings_file + ".aside", settings_file)
+
+    # --- browser copies a scripted Chrome leaves behind: the unused ones, and nothing else in X ------
+    x = cleaner.clone_root()
+    assert x == os.path.join(box, "X"), "the X folder beside the temp folder"
+
+    def clone(ident, name):
+        folder = os.path.join(x, ident + ".code_sign_clone", name)
+        return folder, put("Browser.app", "Contents", "MacOS", "browser", kb=200, root=folder)
+    idle = [clone("com.google.chrome.for.testing", "code_sign_clone.aaa111")[0],
+            clone("com.google.chrome.for.testing", "code_sign_clone.bbb222")[0]]
+    live, live_program = clone("com.google.chrome.for.testing", "code_sign_clone.ccc333")
+    edge, edge_program = clone("com.microsoft.edgemac", "code_sign_clone.ddd444")
+    unknown = clone("org.example.Unknown", "code_sign_clone.eee555")[0]            # any bundle id, not a fixed list
+    not_copies = [put("com.apple.something", "data", root=x), put("loose-file", root=x),
+                  put("com.google.Chrome.code_sign_clone", "notes.txt", root=x),
+                  put("org.other.thing", "code_sign_clone.fff666", "x", root=x)]
+    spelled = live_program.replace("/private/", "/", 1)        # /var/folders/…: the same file through the link
+    assert spelled != live_program and os.path.samefile(spelled, live_program)
+    real_programs = cleaner.program_paths
+    cleaner.program_paths = lambda: {spelled, "/Applications/Other.app/Contents/MacOS/Other"}
+    try:
+        copies = named(cleaner.scan_browser_copies())
+        testing = copies["Browser copies left by automated Chrome for Testing"]
+        assert sorted(testing["paths"]) == sorted(idle), "the copy a running browser was started from stays"
+        assert testing["note"] == "1 in use, left alone." and testing["group"] == "temp" and not testing["blocked"]
+        assert "Selenium, Puppeteer and Playwright" in testing["detail"] and "up to" in testing["detail"]
+        assert cleaner.public(testing, "")["safe"], "pure leftovers: Safe clean may take them"
+        assert copies["Browser copies left by automated Edge"]["paths"] == [edge]
+        assert copies["Browser copies left by automated org.example.Unknown"]["paths"] == [unknown]
+        offered = {p for row in copies.values() for p in row["paths"]}
+        assert offered == set(idle + [edge, unknown]) and all(cleaner.is_clone(p) for p in offered)
+        cleaner.program_paths = lambda: {spelled, edge_program}
+        assert "Browser copies left by automated Edge" not in named(cleaner.scan_browser_copies()), \
+            "a browser with no copy to spare gets no row"
+        # The copy's program is a hard link to the app's own, and the kernel can name the running
+        # program by the app's path. The file is the same one, so the copy is in use all the same.
+        app_program = put("Browser.app", "Contents", "MacOS", "browser", kb=50, root=cleaner.APPLICATIONS)
+        linked, linked_program = clone("org.linked.Browser", "code_sign_clone.ggg777")
+        os.remove(linked_program)
+        os.link(app_program, linked_program)
+        cleaner.program_paths = lambda: {app_program}
+        assert cleaner.clones_in_use([linked, unknown]) == {linked}, "by the file itself, whichever name it runs under"
+        assert "Browser copies left by automated org.linked.Browser" not in named(cleaner.scan_browser_copies())
+        cleaner.program_paths = lambda: set()
+        assert cleaner.clones_in_use([linked, unknown]) == set()
+        # The lock lets exactly those folders through, and nothing else in X or beside it.
+        assert all(cleaner.deletable(p) for p in idle + [live, edge, unknown])
+        for never in [x, os.path.dirname(idle[0]), os.path.join(x, "com.apple.something"), os.path.join(box, "C", "cache"),
+                      os.path.join(x, "org.other.thing", "code_sign_clone.fff666"),
+                      os.path.join(idle[0], "..", "..", "com.apple.something")] + not_copies:
+            assert not cleaner.deletable(never), never
+        os.symlink(outside, os.path.join(x, "linked.code_sign_clone"))
+        assert not cleaner.deletable(os.path.join(x, "linked.code_sign_clone", "code_sign_clone.zzz999"))
+        assert "linked.code" not in " ".join(named(cleaner.scan_browser_copies()))
+        # A browser started from a copy after the scan: asked again at delete time, and it stays.
+        cleaner.program_paths = lambda: {os.path.join(idle[1], "Browser.app", "Contents", "MacOS", "browser")}
+        out = cleaner.delete(testing)
+        assert not os.path.exists(idle[0]) and os.path.exists(idle[1]) and os.path.exists(live), out
+        assert out["errors"] == ["1 copy is in use by a running browser, so it stayed."] and out["left_kb"] >= 200, out
+        assert all(os.path.exists(p) for p in not_copies)
+    finally:
+        cleaner.program_paths = real_programs
+    # With a real process, where there is a C compiler: a program of the test's own that only
+    # sleeps, started under the app's name with a second name inside a copy. What the kernel calls
+    # it is the kernel's business; the copy counts as in use either way.
+    tools = cleaner.developer_dir()
+    clang = os.path.join(tools, "Toolchains", "XcodeDefault.xctoolchain", "usr", "bin", "clang")
+    sdk = next((p for p in (os.path.join(tools, "Platforms", "MacOSX.platform", "Developer", "SDKs", "MacOSX.sdk"),
+                            os.path.join(tools, "SDKs", "MacOSX.sdk")) if os.path.isdir(p)), None)
+    if os.access(clang, os.X_OK) and sdk:
+        napper = os.path.join(cleaner.APPLICATIONS, "Napper.app", "Contents", "MacOS", "napper")
+        os.makedirs(os.path.dirname(napper))
+        with open(os.path.join(box, "napper.c"), "w") as handle:
+            handle.write("#include <unistd.h>\nint main(void) { sleep(120); return 0; }\n")
+        built = subprocess.run([clang, "-isysroot", sdk, "-o", napper, os.path.join(box, "napper.c")], capture_output=True, text=True)
+        assert built.returncode == 0, built.stderr
+        napping, napping_program = clone("org.napper.Browser", "code_sign_clone.hhh888")
+        os.remove(napping_program)
+        os.link(napper, napping_program)
+        asleep = subprocess.Popen([napper])
+        try:
+            for _ in range(100):
+                if any(os.path.basename(p) in ("napper", "browser") and box in os.path.realpath(p) for p in cleaner.program_paths()):
+                    break
+                time.sleep(0.05)
+            assert cleaner.clones_in_use([napping, unknown]) == {napping}, "a running program's copy, found by the file"
+            assert "Browser copies left by automated org.napper.Browser" not in named(cleaner.scan_browser_copies())
+        finally:
+            asleep.kill()
+            asleep.wait()
+
+    # --- model weights: the stores, and loose files Spotlight knows of, every hit checked ------------
+    cleaner.MODEL_MIN_KB, cleaner.ARCHIVE_MIN_KB, cleaner.PACKED_MIN_KB = 64, 32, 64
+    cleaner.OLLAMAS = ()
+    docs = os.path.join(cleaner.HOME, "Documents")
+    hf_model = os.path.dirname(os.path.dirname(put(".cache", "huggingface", "hub", "models--org--tiny-llm", "blobs", "abc", kb=100)))
+    hf_data = os.path.dirname(os.path.dirname(put(".cache", "huggingface", "hub", "datasets--org--set", "blobs", "d", kb=100)))
+    hf_token = put(".cache", "huggingface", "token", kb=1)
+    hf_xet = os.path.dirname(put(".cache", "huggingface", "xet", "chunk", kb=50))
+    # Other tools keep their own data beside Hugging Face's downloads: not downloads, never offered.
+    not_downloads = [put(".cache", "huggingface", "lerobot", "calibration", "arm.json", kb=50),
+                     put(".cache", "huggingface", "trackio", "runs.db", kb=50), put(".cache", "huggingface", "stored_tokens", kb=1),
+                     put(".cache", "huggingface", "hub", "version.txt", kb=1),
+                     put(".cache", "torch", "sentence_transformers", "mine", "model.bin", kb=50),
+                     put(".cache", "torch", "hub", "trusted_list", kb=1), put(".cache", "torch", "hub", "notes", "mine.txt", kb=50)]
+    put(".cache", "torch", "hub", "checkpoints", "resnet50-0676ba61.pth", kb=100)
+    torch_code = os.path.dirname(put(".cache", "torch", "hub", "pytorch_vision_main", "hubconf.py", kb=20))
+    # A store that is really somewhere else, reached through a link: headroom could never clear it.
+    put("jan-data", "models", "phi", "model.gguf", kb=100, root=outside)
+    os.makedirs(os.path.join(cleaner.HOME, "Library", "Application Support", "Jan"))
+    os.symlink(os.path.join(outside, "jan-data"), os.path.join(cleaner.HOME, "Library", "Application Support", "Jan", "data"))
+    put("anaconda3", "conda-meta", "history", kb=1)
+    put(".ollama", "models", "blobs", "sha256-abc", kb=100)
+    gpt4all = put("Library", "Application Support", "nomic.ai", "GPT4All", "mistral.gguf", kb=100)
+    gpt4all_db = put("Library", "Application Support", "nomic.ai", "GPT4All", "localdocs_v2.db", kb=50)
+    jan_file = put("jan", "models", "llama3", "model.gguf", kb=100)
+    for stored in (".cache", ".ollama", "jan", os.path.join("Library", "Application Support", "nomic.ai")):
+        age(os.path.join(cleaner.HOME, stored), 60)
+    put(".lmstudio", "models", "pub", "Model-B", "b.gguf", kb=100)                          # downloaded today
+    trained = put("Documents", "study", "weights", "final.pt", kb=100)        # not a git project, unlike proj
+    hf_bin = put("Documents", "study", "hf", "pytorch_model.bin", kb=100)
+    put("Documents", "study", "hf", "config.json", kb=1)
+    ckpt_bin = put("Documents", "study", "checkpoints", "step-100.bin", kb=100)
+    keras_h5 = put("Documents", "study", "models", "net.h5", kb=100)                        # .h5 where the folder says model
+    plain_bin = put("Documents", "study", "data", "blob.bin", kb=100)                        # .bin, and nothing says model
+    plain_h5 = put("Documents", "study", "data", "measurements.h5", kb=100)                  # .h5 is any kind of data
+    runs = [put("Documents", "runs", f"run{n:02}", "out", "concept_predictor.pth", kb=100) for n in range(7)]
+    age(os.path.join(docs, "runs"), 60)
+    in_repo = put("Desktop", "repo", "weights", "in-repo.pt", kb=100)                        # part of a git project
+    age(in_repo, 60)
+    small_model = put("Documents", "small.onnx", kb=20)
+    package = os.path.join(docs, "Classifier.mlpackage")
+    inside_package = put("Data", "weights.bin", kb=100, root=package)
+    age(os.path.join(docs, "study"), 60)
+    age(package, 60)
+    fresh_weights = put("Documents", "study", "weights", "fresh.safetensors", kb=100)
+    outside_model = put("model.gguf", kb=100, root=outside)
+    model_link = os.path.join(docs, "linked.gguf")
+    os.symlink(outside_model, model_link)
+    cloud_model = put("Documents", "in-icloud.gguf", kb=100)
+    left_out = [
+        put("Documents", "proj", "node_modules", "x", "model.onnx", kb=100), put("Documents", "proj", ".git", "objects", "big.pt", kb=100),
+        put("Documents", "Tool.app", "Contents", "model.gguf", kb=100), put("Documents", "Photos.photoslibrary", "originals", "x.pt", kb=100),
+        put("Documents", "proj", "venv", "lib", "m.onnx", kb=100), put("Library", "Application Support", "SomeApp", "model.gguf", kb=100),
+        put("Desktop", "rusty", "target", "model.onnx", kb=100),               # inside a project's build folder
+        put("anaconda3", "lib", "big.pt", kb=100), put("model-at-top.gguf", kb=100),
+        put("Documents", "tools", "mamba", "conda-meta", "history", kb=1),      # a conda install, wherever it lives
+        put("Documents", "tools", "mamba", "pkgs", "torch", "weights.pt", kb=100),
+        put("Documents", "sdks", "flutter", "bin", "flutter", kb=1), put("Documents", "sdks", "flutter", "bin", "cache", "model.tflite", kb=100),
+        outside_model, os.path.join(cleaner.HOME, "Desktop", "way-out", "model.gguf"),      # outside, also by way of a link
+        model_link, cloud_model, plain_bin, plain_h5, small_model, inside_package, jan_file, gpt4all,
+        "/etc/hosts", os.path.join(docs, "gone.pt"), os.path.join(docs, "study", "weights", "..", "weights", "final.pt")]
+    spot = {"hits": [trained, fresh_weights, hf_bin, ckpt_bin, keras_h5, package, in_repo] + runs + left_out, "code": 0}
+    placeholders.add(os.stat(cloud_model).st_ino)
+    real_go, cleaner.go_caches = cleaner.go_caches, lambda: (None, [os.path.join(cleaner.HOME, "go", "pkg", "mod")])
+
+    def spot_says(command):
+        if command[0] == "/usr/bin/mdfind":
+            assert command[1:4] == ["-0", "-onlyin", cleaner.HOME] and command[4].startswith("kMDItemFSSize >= "), command
+            return spot["code"], "\0".join(spot["hits"])
+        return capture_says(command)
+
+    def spotlit(scan):
+        with recording(Recorder(answer=spot_says, fakes=["/usr/bin/mdfind", "/usr/bin/defaults"], never=("/bin/rm",))):
+            return scan()
+    found, notice = spotlit(cleaner.scan_models)
+    models = named(found)
+    downloaded = ["Hugging Face model org/tiny-llm", "PyTorch checkpoint resnet50-0676ba61.pth"]
+    imported = ["LM Studio model Qwen-9B-GGUF", "LM Studio model Model-B", "GPT4All model mistral.gguf", "Jan model llama3",
+                "Ollama models"]          # these apps also take models you bring yourself
+    loose_names = ["weights / final.pt", "weights / fresh.safetensors", "hf / pytorch_model.bin", "checkpoints / step-100.bin",
+                   "models / net.h5", "Documents / Classifier.mlpackage", "weights / in-repo.pt",
+                   "7 files named concept_predictor.pth in runs"]
+    assert sorted(models) == sorted(downloaded + imported + loose_names + ["Hugging Face downloads", "PyTorch downloads"]), sorted(models)
+    assert notice == "" and len(found) == len(models)
+    for name in downloaded + imported + loose_names:
+        assert models[name]["group"] == "models" and not cleaner.public(models[name], "")["safe"], name
+        assert models[name]["trash"] == (name not in downloaded), (name, "only what a tool downloaded is deleted outright")
+    assert all("again" in models[name]["detail"] for name in downloaded + imported)
+    assert all(models[name]["note"] == cleaner.IMPORTED for name in imported if name != "LM Studio model Model-B")
+    assert "`" not in models["Ollama models"]["detail"] and models["Ollama models"]["quit"]
+    final = models["weights / final.pt"]
+    assert final["paths"] == [trained] and final["note"] == "Goes to the Trash, in case you trained it yourself."
+    assert final["detail"] == "~/Documents/study/weights · added or changed 2 months ago", final["detail"]
+    assert not final["recent"] and not models["Hugging Face model org/tiny-llm"]["recent"]
+    for name in ("weights / fresh.safetensors", "LM Studio model Model-B"):
+        assert models[name]["recent"] and "Added or changed in the last 30 days" in models[name]["note"], name
+    assert models["hf / pytorch_model.bin"]["paths"] == [hf_bin] and models["checkpoints / step-100.bin"]["paths"] == [ckpt_bin]
+    assert models["models / net.h5"]["paths"] == [keras_h5], ".bin and .h5 only where the folder says model"
+    assert models["Documents / Classifier.mlpackage"]["paths"] == [package] and models["Documents / Classifier.mlpackage"]["kb"] >= 100
+    # A model inside a git project is listed, and left out when the whole section is ticked.
+    assert models["weights / in-repo.pt"]["recent"] and "git project" in models["weights / in-repo.pt"]["note"]
+    # A training run's same file in many folders is one row, and stays one row as their number changes.
+    group = models["7 files named concept_predictor.pth in runs"]
+    assert sorted(group["paths"]) == sorted(runs) and group["kb"] >= 700 and group["trash"] and not group["recent"]
+    assert group["detail"].startswith("~/Documents/runs · ") and group["same"] == "named:concept_predictor.pth:" + os.path.join(docs, "runs")
+    assert all(row["seen"] == dict.fromkeys(row["paths"], row["seen"][row["paths"][0]]) for row in found if row["trash"] and row["seen"])
+    # Only what is known to be a download, by name: not everything that isn't a model.
+    assert sorted(models["Hugging Face downloads"]["paths"]) == sorted([hf_data, hf_xet]) and models["Hugging Face downloads"]["group"] == "dev"
+    assert models["Hugging Face downloads"]["detail"] == "Datasets and other downloads. Models and your login stay. ~/.cache/huggingface"
+    assert models["PyTorch downloads"]["paths"] == [torch_code] and "torch.hub" in models["PyTorch downloads"]["detail"]
+    offered = [p for row in found for p in row["paths"]]
+    assert len(offered) == len(set(offered)) and hf_token not in offered, "your Hugging Face login stays"
+    assert not any(kept == p or kept.startswith(p + os.sep) for kept in not_downloads for p in offered), "other tools' own data stays"
+    assert not {p for row in found if row["trash"] and row["seen"] for p in row["paths"]} & set(left_out), "no hit that failed a check"
+    assert not any("phi" in name for name in models) and not any(outside in p for p in offered), "a store behind a link is not listed"
+    assert all(p.startswith(cleaner.HOME + os.sep) and not os.path.islink(p) and cleaner.deletable(p) for p in offered)
+    assert not {"huggingface", "torch"} & {os.path.basename(p) for r in cleaner.scan_home_cache() for p in r["paths"]}, \
+        "~/.cache leaves both to the model rows"
+    with recording(Recorder(never=("/bin/rm",))) as recorder:
+        assert cleaner.delete(final)["errors"] == []
+        assert cleaner.delete(models["GPT4All model mistral.gguf"])["errors"] == [], "may be one you imported: the Trash"
+    assert recorder.calls == [finder + [trained], finder + [gpt4all]] and os.path.exists(trained) and os.path.exists(gpt4all)
+    with recording(Recorder(never=("/bin/rm",))) as recorder:
+        assert cleaner.delete(models["Hugging Face model org/tiny-llm"], to_trash=True)["errors"] == []
+    assert recorder.calls == [finder + [hf_model]], "a download follows the switch"
+    assert cleaner.delete(models["Hugging Face model org/tiny-llm"])["errors"] == []
+    assert not os.path.exists(hf_model) and os.path.exists(hf_token) and all(os.path.exists(p) for p in not_downloads)
+    # A file that is no longer the file the scan saw is not moved.
+    os.rename(ckpt_bin, ckpt_bin + ".aside")
+    os.symlink(kept_outside, ckpt_bin)
+    with recording(Recorder(never=("/bin/rm",))) as recorder:
+        out = cleaner.delete(models["checkpoints / step-100.bin"])
+    assert recorder.calls == [] and "not what the scan found" in out["errors"][0], out
+    os.remove(ckpt_bin)
+    os.rename(ckpt_bin + ".aside", ckpt_bin)
+    # Spotlight finding nothing says nothing (the section is simply empty of them); not answering
+    # is said, and "What grew" is told the source could not be measured. The stores are listed all the same.
+    spot["hits"] = []
+    found, notice = spotlit(cleaner.scan_models)
+    assert notice == "" and not isinstance(notice, cleaner.Unsure)
+    assert {"Jan model llama3", "Ollama models"} <= set(named(found)) and not any(row["seen"] for row in found)
+    spot["code"] = 1
+    for scan in (cleaner.scan_models, cleaner.scan_archives):
+        notice = spotlit(scan)[1]
+        assert "did not answer" in notice and isinstance(notice, cleaner.Unsure), scan
+    spot["code"] = 0
+    # Ollama itself, when it is there: its own command removes a model.
+    ollama = put("ollama", kb=0, root=os.path.join(box, "fake-ollama"))
+    os.chmod(ollama, 0o755)
+    cleaner.OLLAMAS = (ollama,)
+    listing = ("NAME            ID              SIZE      MODIFIED\n"
+               "llama3:latest   365c0bd3c000    4.7 GB    2 days ago\nphi3:mini       4f2222927938    2.2 GB    5 months ago\n")
+    ollama_up = [True]
+    with recording(Recorder(answer=lambda command: ((0, listing) if ollama_up[0] else (1, "")) if command[0] == ollama else spot_says(command),
+                            fakes=[ollama, "/usr/bin/mdfind"])) as recorder:
+        ollamas = named(cleaner.scan_models()[0])
+        ollama_up[0] = False
+        asleep_rows, asleep_notice = cleaner.scan_models()
+    assert ollamas["Ollama model llama3:latest"]["cmd"] == [ollama, "rm", "llama3:latest"] and "Ollama models" not in ollamas
+    assert ollamas["Ollama model llama3:latest"]["group"] == "models" and ollamas["Ollama model llama3:latest"]["recent"]
+    assert "`" not in ollamas["Ollama model llama3:latest"]["detail"] and "ollama pull llama3:latest" in ollamas["Ollama model llama3:latest"]["detail"]
+    assert not ollamas["Ollama model phi3:mini"]["recent"] and ollamas["Ollama model phi3:mini"]["kb"] == cleaner.size_kb("2.2GB")
+    assert named(asleep_rows)["Ollama models"]["blocked"] and isinstance(asleep_notice, cleaner.Unsure) and asleep_notice == ""
+    cleaner.OLLAMAS = ()
+
+    # --- zip files and other archives: Spotlight's hits, checked, and always to the Trash ------------
+    unzipped = put("Documents", "work", "project.zip", kb=64)
+    os.makedirs(os.path.join(docs, "work", "project"))
+    packed = put("Documents", "work", "data.csv.gz", kb=100)
+    put("Documents", "work", "data.csv", kb=1)
+    tarball = put("Documents", "work", "bundle.tar.gz", kb=40)
+    notes_zip = os.path.join(cleaner.HOME, "Downloads", "notes.zip")
+    sets = [put("Documents", "sets", f"part{n:02}.zip", kb=40) for n in range(7)]
+    done_sets = [put("Documents", "done", f"set{n}.7z", kb=40) for n in range(6)]
+    for n in range(6):
+        os.makedirs(os.path.join(docs, "done", f"set{n}"))
+    outside_zip = put("backup.zip", kb=64, root=outside)
+    zip_link = os.path.join(docs, "linked.zip")
+    os.symlink(outside_zip, zip_link)
+    cloud_zip = put("Documents", "in-icloud.zip", kb=64)
+    placeholders.add(os.stat(cloud_zip).st_ino)
+    in_project = put("Desktop", "repo", "fixtures", "data.zip", kb=64)          # a git project's test data
+    not_archives = [
+        in_project, put("go", "pkg", "mod", "cache", "download", "mod.zip", kb=64),              # Go's module cache
+        put(".lmstudio", "models", "pub", "Model-B", "extra.zip", kb=64), os.path.join(os.path.dirname(jan_file), "pack.zip"),
+        put("Documents", "tools", "mamba", "pkgs", "big-1.0.tar.bz2", kb=100),  # a conda install somewhere else
+        put("Documents", "sdks", "flutter", "bin", "cache", "artifacts.zip", kb=64),
+        put("Documents", "work", "small.log.gz", kb=40),                        # a plain .gz counts only when big
+        put("Documents", "work", "tiny.zip", kb=10), put("Documents", "work", "report.zip.txt", kb=64),
+        os.path.join(cleaner.HOME, "Downloads", "App.zip"),                     # a zipped app: Installer files has it
+        put("anaconda3", "pkgs", "again-1.0.tar.bz2", kb=100),                  # Conda package downloads has it
+        put("Documents", "proj", "node_modules", "x", "dep.zip", kb=64), put("Library", "Caches", "com.example.kept", "c.zip", kb=64),
+        put("Documents", "Tool.app", "Contents", "res.zip", kb=64), put(".Trash", "old.zip", kb=64),
+        os.path.join(docs, "work", "project"), outside_zip, zip_link, cloud_zip, "/etc/hosts"]
+    write(os.path.join(os.path.dirname(jan_file), "pack.zip"), os.urandom(64 * 1024))
+    spot["hits"] = [unzipped, packed, tarball, notes_zip] + sets + done_sets + not_archives
+    found, notice = spotlit(cleaner.scan_archives)
+    archives = named(found)
+    assert sorted(archives) == sorted(["work / project.zip", "work / data.csv.gz", "work / bundle.tar.gz", "Downloads / notes.zip",
+                                       "7 archives in sets", "6 archives already unzipped in done"]), sorted(archives)
+    assert notice == "" and all(row["group"] == "archives" and row["trash"] and row["seen"] for row in found)
+    assert not any(cleaner.public(row, "")["safe"] or row["cmd"] for row in found), "never Safe clean, never a command"
+    assert archives["work / project.zip"]["note"] == "A folder named project is next to it."
+    assert archives["work / data.csv.gz"]["note"] == "A file named data.csv is next to it."
+    assert archives["work / bundle.tar.gz"]["note"] == "" and "~/Documents/work · added" in archives["work / bundle.tar.gz"]["detail"]
+    assert {name for name, row in archives.items() if cleaner.public(row, "")["rank"]} == {
+        "work / project.zip", "work / data.csv.gz", "6 archives already unzipped in done"}, "the unzipped ones come first"
+    assert archives["7 archives in sets"]["paths"] == sets, "a folder full of them is one row"
+    assert archives["7 archives in sets"]["detail"] == "~/Documents/sets · part00.zip, part01.zip, part02.zip and 4 more"
+    assert archives["7 archives in sets"]["same"] == "archives:" + os.path.join(docs, "sets") + ":False", "known by its folder, not its count"
+    assert archives["6 archives already unzipped in done"]["paths"] == done_sets
+    offered = [p for row in found for p in row["paths"]]
+    assert len(offered) == len(set(offered)) and not set(offered) & set(not_archives)
+    assert all(p.startswith(cleaner.HOME + os.sep) and os.path.isfile(p) and not os.path.islink(p) for p in offered)
+    with recording(Recorder(never=("/bin/rm",))) as recorder:
+        assert cleaner.delete(archives["7 archives in sets"])["errors"] == []
+    assert recorder.calls == [finder + sets], recorder.calls
+    assert all(os.path.exists(p) for p in sets), "the recorder stood in for Finder"
+    spot["hits"] = []
+    assert spotlit(cleaner.scan_archives) == ([], ""), "nothing found says nothing: an empty section is enough"
+
+    # --- a path is offered once: no row holds another row's path, or anything inside one --------------
+    spot["hits"] = [trained, fresh_weights, hf_bin, ckpt_bin, keras_h5, package, in_repo, unzipped, packed, tarball, notes_zip] \
+        + runs + sets + done_sets + left_out + not_archives
+    fresh()
+    seen = {}
+    for name, (_, source_scan) in cleaner.SOURCES.items():
+        if name in ("simulators", "homebrew", "docker"):                # their rows are commands, without paths
+            continue
+        found = spotlit(source_scan) if name in ("screenshots", "models", "archives") else source_scan()
+        for row in found[0] if isinstance(found, tuple) else found:
+            for p in row["paths"]:
+                assert p not in seen, (p, "is in two rows", (name, row["name"]), seen[p])
+                seen[p] = (name, row["name"])
+    assert {"models", "archives", "screenshots", "browser_copies"} <= {name for name, _ in seen.values()}
+    for p in seen:
+        above = os.path.dirname(p)
+        while len(above) > len(box):
+            assert above not in seen, (p, seen[p], "is inside", seen.get(above))
+            above = os.path.dirname(above)
+    cleaner.dataless, cleaner.go_caches = earlier_dataless, real_go
+
+    # --- what grew: one snapshot of the sizes a day, set against one from about a week ago ----------
+    sizes_file = os.path.join(cleaner.state_dir(), "sizes.json")
+    noon = time.mktime((2026, 10, 12, 12, 0, 0, 0, 0, -1))
+    cleaner.GREW_KB = 1000
+    grew = lambda: cleaner.growth(noon)
+
+    def sized_row(group, name, path, kb, blocked="", same=""):
+        made = cleaner.item(group, name, [path], kb, blocked=blocked)
+        made["same"] = same
+        return made
+
+    def snap(days_ago, source, *rows, failed=False):
+        cleaner.keep_sizes(source, [sized_row(*row) for row in rows], noon - days_ago * cleaner.DAY, failed)
+
+    def forget():
+        if os.path.exists(sizes_file):
+            os.remove(sizes_file)
+    nothing = {"span": "", "sections": {}, "top": []}
+    forget()
+    assert grew() == nothing, "no history: no numbers"
+    snap(0, "dev_tools", ("dev", "npm downloads", "/a", 9000))
+    assert grew() == nothing, "today alone is nothing to compare with"
+    snap(0, "dev_tools", ("dev", "npm downloads", "/a", 9500))
+    assert json.load(open(sizes_file)) == {"2026-10-12": {"dev_tools": {
+        cleaner.item("dev", "npm downloads", ["/a"], 0)["id"]: ["dev", "npm downloads", 9500]}}}, "a day holds one snapshot"
+    snap(1, "dev_tools", ("dev", "npm downloads", "/a", 8000))
+    assert grew()["span"] == "in 1 day" and grew()["sections"] == {"dev": 1500}, grew()
+    snap(3, "dev_tools", ("dev", "npm downloads", "/a", 7000))
+    assert grew()["span"] == "in 3 days" and grew()["sections"] == {"dev": 2500}, "the oldest there is"
+    snap(12, "dev_tools", ("dev", "npm downloads", "/a", 1000))
+    snap(20, "dev_tools", ("dev", "npm downloads", "/a", 500))
+    assert grew()["span"] == "in 12 days" and grew()["sections"] == {"dev": 8500}, "nearest past a week"
+    snap(6, "dev_tools", ("dev", "npm downloads", "/a", 6000))
+    snap(8, "dev_tools", ("dev", "npm downloads", "/a", 5000))
+    week = grew()
+    assert week["span"] == "this week" and week["sections"] == {"dev": 4500}, ("the oldest of 5 to 9 days back", week)
+    snap(10, "dev_tools", ("dev", "npm downloads", "/a", 2000))
+    assert grew() == week, "not one from further back"
+    # A day after today (the clock was wrong for a while) is never the newest scan, and is dropped at the next one.
+    far = max(noon, time.time()) + 3 * cleaner.DAY
+    cleaner.keep_sizes("dev_tools", [sized_row("dev", "npm downloads", "/a", 99000)], far)
+    assert cleaner.day_of(far) in json.load(open(sizes_file)) and grew() == week, "ignored when reading"
+    snap(0, "dev_tools", ("dev", "npm downloads", "/a", 9500))
+    assert cleaner.day_of(far) not in json.load(open(sizes_file)) and grew() == week, "and gone when the file is next written"
+    # Rows: by id, by name when a row's paths (and so its id) changed, new ones marked, shrunk ones left out.
+    forget()
+    snap(7, "dev_tools", ("dev", "npm downloads", "/a", 5000), ("dev", "Gradle caches", "/g", 4000),
+         ("dev", "Xcode build data", "/x/one", 2000), ("dev", "Yarn cache", "/y", 900))
+    snap(7, "docker", ("big", "Docker images no container uses", "/d", 0, "Start Docker to measure this"),
+         ("dev", "Docker build cache", "/b", 1000))
+    snap(7, "homebrew", failed=True)                                    # Homebrew did not answer that day
+    snap(7, "caches", *[("apps", f"cache {n}", f"/c{n}", 100) for n in range(5)])
+    snap(7, "archives", ("archives", "9 archives in sets", "/s/one", 9000, "", "archives:/s:False"))
+    snap(0, "dev_tools", ("dev", "npm downloads", "/a", 9000), ("dev", "Gradle caches", "/g", 1000),
+         ("dev", "Xcode build data", "/x/two", 6000), ("dev", "Yarn cache", "/y", 1800), ("dev", "pip downloads", "/p", 3000))
+    snap(0, "docker", ("big", "Docker images no container uses", "/d", 50000), ("dev", "Docker build cache", "/b", 3000))
+    snap(0, "homebrew", ("dev", "Homebrew old versions", "/h", 40000))
+    snap(0, "caches", *[("apps", f"cache {n}", f"/c{n}", 400) for n in range(5)])
+    snap(0, "archives", ("archives", "12 archives in sets", "/s/two", 12000, "", "archives:/s:False"))
+    snap(0, "builds", ("builds", "web / node_modules", "/w", 70000))    # not measured a week ago
+    week = grew()
+    assert week["sections"] == {"dev": 10900, "apps": 1500, "archives": 3000}, ("only what both days measured", week["sections"])
+    assert week["top"] == [
+        {"name": "npm downloads", "group": "dev", "kb": 4000, "new": False},
+        {"name": "Xcode build data", "group": "dev", "kb": 4000, "new": False},    # found by its name
+        {"name": "12 archives in sets", "group": "archives", "kb": 3000, "new": False},   # the same row, three more in it
+        {"name": "pip downloads", "group": "dev", "kb": 3000, "new": True},
+        {"name": "Docker build cache", "group": "dev", "kb": 2000, "new": False},  # beside a row that could not be measured
+        {"name": "", "group": "apps", "kb": 1500, "new": False}], week["top"]    # a section itself, when none of its rows is listed
+    saved = json.load(open(sizes_file))
+    assert saved["2026-10-05"]["homebrew"] is None, "a scan that failed is not a scan that found nothing"
+    assert ["big", "Docker images no container uses", None] in saved["2026-10-05"]["docker"].values(), \
+        "a row that could not be measured has no size, not 0"
+    assert "archives:/s:False" in saved["2026-10-12"]["archives"], "kept under what stays the same about it"
+    # A source that fails today is unknown today: not compared, and not counted as gone.
+    snap(0, "docker", failed=True)
+    assert grew()["sections"] == {"dev": 8900, "apps": 1500, "archives": 3000}, grew()["sections"]
+    # A later day that holds only what a delete touched must not hide the sources scanned the day before.
+    forget()
+    snap(8, "dev_tools", ("dev", "npm downloads", "/a", 1000))
+    snap(8, "caches", ("apps", "big", "/c", 9000))
+    snap(1, "dev_tools", ("dev", "npm downloads", "/a", 6000))
+    snap(1, "caches", ("apps", "big", "/c", 9500))
+    snap(0, "caches", ("apps", "big", "/c", 0))                         # deleted just after midnight
+    assert grew() == {"span": "this week", "sections": {"dev": 5000},
+                      "top": [{"name": "npm downloads", "group": "dev", "kb": 5000, "new": False}]}, grew()
+    # The file is compacted: one snapshot a day, and nothing over 30 days old.
+    forget()
+    for days_ago in range(45, -1, -1):
+        for hour in (0, 3600):
+            cleaner.keep_sizes("dev_tools", [cleaner.item("dev", "npm downloads", ["/a"], 1000 + hour)],
+                               noon - days_ago * cleaner.DAY + hour)
+    kept = json.load(open(sizes_file))
+    assert len(kept) == 31 and min(kept) == "2026-09-12" and max(kept) == "2026-10-12", (len(kept), min(kept), max(kept))
+    assert all(list(day) == ["dev_tools"] and list(day["dev_tools"].values()) == [["dev", "npm downloads", 4600]]
+               for day in kept.values()), "the later scan of a day replaces the earlier one"
+    assert os.path.getsize(sizes_file) < 4000
+    # A file that isn't what headroom wrote claims nothing and breaks nothing.
+    for broken in ("[1, 2]", "{", json.dumps({"2026-10-12": "x", "not-a-day": {}, "2026-10-05": {"dev_tools": {"id": ["dev", 3]}}}),
+                   json.dumps({"2026-10-12": {"dev_tools": {"a": ["dev", "x", "9"]}}, "2026-10-05": {"dev_tools": 4}})):
+        with open(sizes_file, "w") as handle:
+            handle.write(broken)
+        assert grew()["sections"] == {} and grew()["top"] == [], broken
+    forget()
+    cleaner.GREW_KB = 100 * 1024
+
+    # --- the folder measurer: its numbers when it is there, du's for whatever it leaves out ----------
+    assert cleaner.find_sizer() == (os.path.realpath(os.environ["HEADROOM_SIZE"]) if os.environ.get("HEADROOM_SIZE") else None), \
+        "from source there is none, unless HEADROOM_SIZE points at one"
+    # It is looked for inside an app bundle only: a MacOS folder that happens to sit beside a
+    # plain folder of source is somebody else's.
+    real_here, wanted = cleaner.HERE, os.environ.pop("HEADROOM_SIZE", None)
+    for layout, found in ((("app", "Contents", "Resources"), True), (("plain", "headroom"), False)):
+        cleaner.HERE = os.path.join(box, "layouts", *layout)
+        os.makedirs(cleaner.HERE)
+        beside = put("MacOS", "headroom-size", kb=1, root=os.path.dirname(cleaner.HERE))
+        os.chmod(beside, 0o755)
+        assert (cleaner.find_sizer() == beside) == found, layout
+    cleaner.HERE = real_here
+    if wanted:
+        os.environ["HEADROOM_SIZE"] = wanted
+    fake_sizer = put("headroom-size", kb=0, root=os.path.join(box, "fake-sizer"))
+    os.chmod(fake_sizer, 0o755)
+    one, two = (os.path.dirname(put("Documents", "measure", name, "f", kb=100)) for name in ("one", "two"))
+    never_asked = os.path.dirname(put("Documents", "thesis", "draft.txt"))
+    measure = os.path.join(docs, "measure")
+    plain, whole = cleaner.du([one, two]), cleaner.du([measure])[measure]
+    assert plain[one] >= 100 and plain[two] >= 100
+    # A line ends at a line feed and nowhere else. A folder name can hold U+2028, which Python's
+    # splitlines() also breaks at, and what follows it would read as another folder's size.
+    odd = f"{two}\u2028999\t{one}"
+    assert cleaner.measured_lines(f"5\t{one}\n7\t{odd}\n", {one, odd}) == {one: 5, odd: 7}
+
+    def sizer_says(command):
+        assert command[1] == "--", command
+        return 0, f"777\t{one}\n99999\t{never_asked}\nnot a line\n\t{two}\nabc\t{two}\n"
+    try:
+        cleaner.SIZER = fake_sizer
+        with recording(Recorder(answer=sizer_says, fakes=[fake_sizer])) as recorder:
+            sizes = cleaner.du([one, two, os.path.join(docs, "not-there")])
+        assert recorder.calls == [[fake_sizer, "--", one, two]], "one call: it works on several threads by itself"
+        assert sizes == {one: 777, two: plain[two]}, ("its number, du's for the path it left out, nothing unasked", sizes)
+        with recording(Recorder(answer=sizer_says, stderr=f"headroom-size: {one}/locked: Permission denied\n",
+                                fakes=[fake_sizer])):
+            sizes, total, denied = cleaner.du_children(os.path.join(docs, "measure"))
+        assert sizes == {one: 777, two: plain[two]} and denied == [one + "/locked"], (sizes, denied)
+        assert total == whole, "the folder's own total is the folder measured as one thing, not its children added up"
+        # A folder with thousands of subfolders: 400 to a call, as for any other measuring.
+        crowd = os.path.join(docs, "crowd")
+        for n in range(900):
+            os.makedirs(os.path.join(crowd, f"{n:04}-" + "x" * 60))
+        with recording(Recorder(answer=lambda command: (0, ""), fakes=[fake_sizer])) as recorder:
+            sizes, total, _ = cleaner.du_children(crowd)
+        assert len(sizes) == 900 and [len(call) - 2 for call in recorder.calls] == [400, 400, 100, 1], [len(c) for c in recorder.calls]
+        shutil.rmtree(crowd)
+        cleaner.SIZER = os.path.join(box, "no-such-measurer")
+        assert cleaner.du([one, two]) == plain, "a measurer that won't start: du measures everything"
+        assert cleaner.du_children(measure)[0] == plain
+    finally:
+        cleaner.SIZER = None
+    shutil.rmtree(never_asked)
+    # du gives a number even for a folder it could not get to the bottom of (names longer than a
+    # path may be). That number is too small, and the row says so instead of showing it as the size.
+    deep = os.path.join(docs, "deep")
+    os.makedirs(deep)
+    os.chdir(deep)
+    for _ in range(6):
+        os.mkdir("d" * 200)
+        os.chdir("d" * 200)
+    with open("payload", "wb") as handle:
+        handle.write(os.urandom(900 * 1024))
+    os.chdir(here)
+    assert cleaner.du([deep, one]) == {deep: 0, one: plain[one]} and cleaner.PARTLY == {deep}, cleaner.PARTLY
+    cleaner.SOURCES["probe"] = (("dev",), lambda: [cleaner.item("dev", "deep", [deep], cleaner.du([deep])[deep]),
+                                                   cleaner.item("dev", "one", [one], cleaner.du([one])[one])])
+    probe = {row["name"]: row for row in cleaner.scan("probe")["items"]}
+    assert probe["deep"]["note"] == "At least this much: part of it could not be measured." and probe["one"]["note"] == "", probe
+    assert [entry[2] for entry in json.load(open(sizes_file))[time.strftime("%Y-%m-%d")]["probe"].values()] == [None, plain[one]]
+    del cleaner.SOURCES["probe"]
+    cleaner.FOUND.pop("probe", None)
+    subprocess.run(["/bin/rm", "-rf", "--", deep], check=True)
+    assert cleaner.du([one]) == {one: plain[one]} and cleaner.du([deep]) == {}
+    cleaner.PARTLY.clear()
+    forget()
+
+    # The real one, where there is a Swift compiler to build it with: the numbers `du -sk` prints.
+    tools = cleaner.developer_dir()
+    swiftc = next((p for p in (os.path.join(tools, "Toolchains", "XcodeDefault.xctoolchain", "usr", "bin", "swiftc"),
+                               os.path.join(tools, "usr", "bin", "swiftc")) if os.access(p, os.X_OK)), None)
+    sdk = next((p for p in (os.path.join(tools, "Platforms", "MacOSX.platform", "Developer", "SDKs", "MacOSX.sdk"),
+                            os.path.join(tools, "SDKs", "MacOSX.sdk")) if os.path.isdir(p)), None)
+    # Built for the chip this Mac has, and never when this Python itself is being translated.
+    translated = subprocess.run(["/usr/sbin/sysctl", "-in", "sysctl.proc_translated"], capture_output=True, text=True).stdout.strip() == "1"
+    if swiftc and sdk and not translated:
+        built = os.path.join(box, "built", "headroom-size")
+        os.makedirs(os.path.dirname(built))
+        made = subprocess.run([swiftc, "-O", "-sdk", sdk, "-target", f"{platform.machine()}-apple-macos12", "-o", built,
+                               os.path.join(os.path.dirname(os.path.abspath(cleaner.__file__)), "launcher", "size.swift")],
+                              capture_output=True, text=True)
+        assert made.returncode == 0, made.stderr
+        tree = os.path.join(box, "sized")
+        put("a", "one.bin", kb=300, root=tree)
+        put("a", "b", "two.bin", kb=5, root=tree)
+        put("a", "b", "c", "tiny", kb=1, root=tree)
+        os.makedirs(os.path.join(tree, "empty"))
+        elsewhere = os.path.dirname(put("big", "huge.bin", kb=2000, root=os.path.join(box, "sized-outside")))
+        os.symlink(elsewhere, os.path.join(tree, "a", "link-out"))               # never followed
+        os.link(put("hard-a", kb=700, root=tree), os.path.join(tree, "a", "b", "hard-b"))    # one file, two names
+        with open(os.path.join(tree, "sparse.img"), "wb") as handle:           # 50 MB long, almost none of it on disk
+            handle.truncate(50 * 1024 * 1024)
+            handle.seek(40 * 1024 * 1024)
+            handle.write(b"x" * 5000)
+        put("locked", "inner", "secret", kb=90, root=tree)
+        os.chmod(os.path.join(tree, "locked"), 0)
+        put("-dash", "x", kb=9, root=tree)
+        many = [os.path.dirname(put("many", f"d{n:03}", "f", kb=n % 7, root=tree)) for n in range(450)]
+
+        def du_says(roots, cwd=None):
+            done = subprocess.run(["/usr/bin/du", "-sk", "--"] + roots, capture_output=True, text=True, cwd=cwd)
+            return cleaner.measured_lines(done.stdout, set(roots))
+        roots = [os.path.join(tree, *parts) for parts in ((), ("a",), ("a", "b"), ("empty",), ("sparse.img",), ("a", "link-out"),
+                                                           ("hard-a",), ("many",), ("a", "b", "hard-b"))]
+        unsure = [os.path.join(tree, "locked"), os.path.join(tree, "not-there")]
+        expected = {}
+        for root in roots + unsure:
+            expected.update(du_says([root]))                # a run each: du counts a file's second name once a run
+        expected.update(du_says(many))
+        assert set(expected) == set(roots + many) and expected[os.path.join(tree, "a", "link-out")] == 0, "du's own answers"
+        assert 700 <= expected[os.path.join(tree, "a", "b")] < 1400 and expected[os.path.join(tree, "sparse.img")] < 50 * 1024
+        ran = subprocess.run([built, "--"] + roots + unsure + many, capture_output=True, text=True)
+        assert cleaner.measured_lines(ran.stdout, set(roots + unsure + many)) == expected, "the same numbers as du"
+        assert len(ran.stdout.splitlines()) == len(expected), "and no line for a path it may not read or that isn't there"
+        assert ran.returncode == 1 and f"headroom-size: {unsure[0]}: Permission denied" in ran.stderr
+        ran = subprocess.run([built, "--", "-dash", "empty"], capture_output=True, text=True, cwd=tree)
+        assert ran.stdout == f"{du_says(['-dash'], cwd=tree)['-dash']}\t-dash\n0\tempty\n" and ran.returncode == 0, ran.stdout
+        assert subprocess.run([built, "-dash"], capture_output=True, cwd=tree).returncode == 64, "an option it doesn't have"
+        try:
+            cleaner.SIZER = built
+            assert cleaner.du(roots + unsure + many) == expected, "through headroom, 400 paths at a time"
+            # The Disk tab. A file with names in two subfolders counts in each of them, and once
+            # in the folder's own total, which is the folder measured as one thing.
+            os.makedirs(os.path.join(tree, "twin"))
+            os.link(os.path.join(tree, "hard-a"), os.path.join(tree, "twin", "hard-c"))
+            sizes, total, denied = cleaner.du_children(tree)
+            assert total == expected[tree] and sizes[os.path.join(tree, "twin")] >= 700 and sizes[os.path.join(tree, "a")] >= 700
+            assert sum(sizes.values()) > total + 700, "adding the children up would count that file three times"
+            os.remove(os.path.join(tree, "hard-a"))
+            os.remove(os.path.join(tree, "twin", "hard-c"))
+            sizes, _, denied = cleaner.du_children(tree)
+            cleaner.SIZER = None
+            assert (sizes, denied) == (cleaner.du_children(tree)[0], cleaner.du_children(tree)[2]), "the same listing as du's"
+            assert denied == [os.path.join(tree, "locked")]
+        finally:
+            cleaner.SIZER = None
+        os.chmod(os.path.join(tree, "locked"), 0o755)
+        shutil.rmtree(tree)
+
+    # --- the port the app's launcher keeps for headroom is tried first ---------------------------------
+    port_file = os.path.join(cleaner.state_dir(), "port")
+    assert cleaner.reserved_port() is None, "no file: nothing kept, the usual ports"
+    for text in ("", "abc", "8459", "8480", "99999", "84 71", "-8461", "\u0668\u0664\u0666\u0661", "8461x"):
+        with open(port_file, "w") as handle:
+            handle.write(text)
+        assert cleaner.reserved_port() is None, repr(text)
+
+    def unused(candidate):
+        try:
+            for family, address in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+                with socket.socket(family) as probe:
+                    probe.bind((address, candidate))
+        except OSError:
+            return False
+        return True
+    spare = next((candidate for candidate in range(8479, 8460, -1) if unused(candidate)), None)
+    if spare:
+        with open(port_file, "w") as handle:
+            handle.write(f"{spare}\n")
+        assert cleaner.reserved_port() == spare
+        kept4, kept6 = cleaner.listen()
+        assert kept4.server_port == spare and kept6.server_port == spare, "the kept port first, though the usual list is empty here"
+        for server in (kept4, kept6):
+            server.server_close()
+    os.remove(port_file)
 
     # --- the page's API: only this launch's page gets in ---------------------
     v4, v6 = cleaner.listen()
@@ -1259,11 +2246,120 @@ try:
     assert call("/api/settings")[1]["alert_gb"] == 20
     with recording(Recorder()) as recorder:
         assert call("/api/settings", body={"alert": False, "alert_gb": 15})[1] == {
-            "alert": False, "weekly": True, "alert_gb": 15, "available": True}
+            "alert": False, "weekly": True, "alert_gb": 15, "trash": False, "available": True}
         assert call("/api/settings", body={"alert_gb": 99999})[1]["alert_gb"] == 15, "a silly number is ignored"
     assert recorder.calls and all(c[0] == "/bin/launchctl" for c in recorder.calls)
     space = call("/api/space")[1]
     assert space["samples"] and space["total_kb"] > 0
+
+    # Slow sources are named, so the page can call the scan finished without them.
+    sources = {s["id"]: s for s in call("/api/start")[1]["sources"]}
+    assert {name: s["slow"] for name, s in sources.items() if s["slow"]} == {
+        "homebrew": "Homebrew", "docker": "Docker", "simulators": "the simulators"}, sources
+    assert {"screenshots", "models", "archives", "browser_copies"} <= set(sources) and sources["builds"]["groups"] == ["builds", "dev"]
+
+    # Move to Trash over the API: a setting, read once when a delete starts. Finder moves the row, rm never runs.
+    def wait_for_job():
+        for _ in range(200):
+            progress = call("/api/progress")[1]
+            if not progress["running"]:
+                return progress
+            time.sleep(0.05)
+        raise AssertionError("the delete did not finish")
+
+    def api_cache(name):
+        folder = os.path.dirname(put("Library", "Caches", "com.switch." + name, "blob", kb=200))
+        return folder, next(r for r in call("/api/scan?source=caches")[1]["items"] if r["name"] == name)
+    with recording(Recorder(never=("/bin/rm",))) as recorder:
+        assert call("/api/settings", body={"trash": True})[1]["trash"] is True
+        assert call("/api/start")[1]["trash"] is True
+        first_cache, row = api_cache("api")
+        assert row["blocked"] == "" and row["action"] == "" and row["rank"] == 0 and row["weighs"] == 0 and "paths" not in row
+        assert call("/api/delete", body={"ids": [row["id"]]})[0] == 200
+        progress = wait_for_job()
+        assert call("/api/settings", body={"trash": "yes"})[1]["trash"] is True, "only true or false changes it"
+        assert call("/api/settings", body={"trash": False})[1]["trash"] is False
+        # The question the page asked promised the Trash. The switch has been turned off since (in
+        # another tab, or while an earlier delete ran): the promise is kept, and rm does not run.
+        promised_cache, promised = api_cache("promised")
+        assert call("/api/delete", body={"ids": [promised["id"]], "trash": True})[0] == 200
+        kept_promise = wait_for_job()
+    assert progress["trash"] is True and progress["results"][0]["trashed"] and progress["results"][0]["errors"] == [], progress
+    assert kept_promise["trash"] is True and kept_promise["results"][0]["trashed"], kept_promise
+    assert [c for c in recorder.calls if c[0] == "/usr/bin/osascript"] == [finder + [first_cache], finder + [promised_cache]]
+    assert os.path.exists(first_cache) and os.path.exists(promised_cache), "the recorder stood in for Finder"
+    assert call("/api/history")[1]["items"][0]["result"] == "trashed" and call("/api/start")[1]["trash"] is False
+    # Never the reverse: with the switch on, a request that says "not the Trash" still goes to the Trash.
+    with recording(Recorder(never=("/bin/rm",))) as recorder:
+        assert call("/api/settings", body={"trash": True})[1]["trash"] is True
+        on_cache, on_row = api_cache("stays-on")
+        assert call("/api/delete", body={"ids": [on_row["id"]], "trash": False})[0] == 200
+        assert wait_for_job()["results"][0]["trashed"]
+        # While a delete runs, where things go can't be changed under it.
+        cleaner.JOB["running"] = True
+        assert call("/api/settings", body={"trash": False, "alert_gb": 25})[1] == {
+            "alert": False, "weekly": True, "alert_gb": 25, "trash": True, "available": True}
+        cleaner.JOB["running"] = False
+        assert call("/api/settings", body={"trash": False, "alert_gb": 15})[1]["trash"] is False
+    assert [c for c in recorder.calls if c[0] == "/usr/bin/osascript"] == [finder + [on_cache]]
+    # A settings file that is there but can't be read: nobody knows where things were meant to go,
+    # so nothing is deleted on a guess. Setting the switch again writes a good file.
+    api_file = os.path.join(cleaner.state_dir(), "settings.json")
+    good = open(api_file).read()
+    doubt_cache, doubt = api_cache("doubt")
+    for broken in ("{not json", '{"trash": 1}'):
+        with open(api_file, "w") as handle:
+            handle.write(broken)
+        status, said, _ = call("/api/delete", body={"ids": [doubt["id"]]})
+        assert status == 500 and "can't read its settings" in said["error"] and os.path.exists(doubt_cache), (broken, status, said)
+        assert call("/api/progress")[1]["running"] is False
+    with recording(Recorder()):
+        assert call("/api/settings", body={"trash": False})[1]["trash"] is False
+    assert not cleaner.settings_broken() and json.load(open(api_file))["trash"] is False
+    with open(api_file, "w") as handle:
+        handle.write(good)
+
+    # What grew over the API: every scan leaves the day's sizes behind, and a delete updates them.
+    assert call("/api/growth")[1] == {"span": "", "sections": {}, "top": []}, "one day of history claims nothing"
+    today = time.strftime("%Y-%m-%d")
+    kept = json.load(open(sizes_file))
+    assert list(kept) == [today] and kept[today]["caches"][doubt["id"]] == ["apps", "doubt", doubt["kb"]]
+    assert call("/api/delete", body={"ids": [doubt["id"]]})[0] == 200
+    progress = wait_for_job()
+    assert not os.path.exists(doubt_cache) and progress["trash"] is False and not progress["results"][0]["trashed"]
+    assert json.load(open(sizes_file))[today]["caches"][doubt["id"]] == ["apps", "doubt", 0]
+
+    # One scan of a source at a time: a second request while the first is running waits for it and
+    # gets the same answer, so "Scan again" never starts a slow source's programs twice over.
+    started, release = [], threading.Event()
+
+    def slow_scan():
+        started.append(time.time())
+        release.wait(10)
+        return [cleaner.item("dev", "slow thing", [os.path.join(cleaner.HOME, "Library", "Caches", "com.switch.two")], 5000)]
+    cleaner.SOURCES["slowpoke"] = (("dev",), slow_scan)
+    answers = []
+    askers = [threading.Thread(target=lambda: answers.append(call("/api/scan?source=slowpoke")[1])) for _ in range(3)]
+    for asker in askers:
+        asker.start()
+    time.sleep(0.5)
+    release.set()
+    for asker in askers:
+        asker.join(20)
+    assert len(started) == 1 and len(answers) == 3 and answers[0] == answers[1] == answers[2], (len(started), answers)
+    assert answers[0]["items"][0]["name"] == "slow thing" and cleaner.SCANNING == {}
+    del cleaner.SOURCES["slowpoke"]
+    cleaner.FOUND.pop("slowpoke", None)
+
+    # The Disk tab answers with an error when measuring cannot even start; it does not go quiet.
+    real_places = cleaner.explore_places
+
+    def no_room(pid):
+        raise OSError(7, "Argument list too long")
+    cleaner.explore_places = no_room
+    status, said, _ = call("/api/explore?view=places")
+    cleaner.explore_places = real_places
+    assert status == 500 and said == {"error": "Argument list too long."}, (status, said)
 
     # A tab closing mid-reply is not worth a traceback in the log.
     noise = io.StringIO()
@@ -1367,6 +2463,10 @@ try:
         assert info["latest"] is None and not info["newer"], info
     finally:
         cleaner.newest_release = real_newest
+    # The Finder script once called its variable `target`, a word of Finder's own: inside the tell,
+    # Finder looked up its own "target" and every move failed (-1728). The stand-in Finder here
+    # can't show that, so the word itself is checked. Verified against the real Finder by hand.
+    assert not re.search(r"\bset target\b|\bdelete target\b", cleaner.TRASH_SCRIPT), cleaner.TRASH_SCRIPT
     print("ok")
 finally:
     listener.close()

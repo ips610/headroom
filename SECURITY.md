@@ -26,7 +26,18 @@ Only the latest release. If you're on an older one, update first: the fix will b
   another program on the Mac could be sent it. The key it can't get.
 - The page sends the ids of rows it was shown, never file paths. The app deletes only what its own
   scan found, and checks again that each path is inside your home folder and not reached through
-  a symlink.
+  a symlink. Outside the home and temp folders it accepts one thing: the copies of itself an
+  automated Chrome leaves next to the temp folder, and never one a running browser was started from.
+- What Spotlight says is only a hint. Every file it names is checked again: really there, inside
+  your home folder, not a symlink, not only in iCloud.
+- With "Move cleaned files to the Trash" on, nothing is removed for good: no `rm`, and no row
+  that only a command can clear. A symlink is never handed to Finder, which would move what it
+  points at.
+- In a git repository it only runs `git gc`, and not while a rebase or merge is half done. Every
+  git call is made so that git runs nothing the repository names: no hooks, no file-system
+  monitor, no fetching. A repository that sets its own program for gc is left alone.
+- If its settings file can't be read, it refuses to delete instead of guessing whether cleaned
+  files were meant for the Trash.
 - Tasks that need an administrator go through macOS's own password dialog. headroom never sees
   your password.
 - It never downloads or installs anything by itself. The update check only reads a version number.

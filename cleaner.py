@@ -48,7 +48,8 @@ TMP = os.path.realpath(run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]).stdout.
 HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 FROZEN = getattr(sys, "frozen", False)
 
-# The page lives at http://headroom.localhost:8460. Anyone on this Mac may load it: it holds no
+# The page lives at http://headroom.localhost, on port 8460 unless the launcher had to keep
+# another one for it (see reserved_port). Anyone on this Mac may load it: it holds no
 # secret. What it may do is decided call by call, by a session the browser gets from the address
 # headroom itself opens, which carries a login code once (?k=...). "Signing in" below has it all.
 # RUN marks this launch, so a tab left over from an earlier one is turned away instead of acting
@@ -59,7 +60,7 @@ RUN = secrets.token_hex(8)
 NONCE = secrets.token_urlsafe(16)
 
 # install.py and package.sh read the version from here. A newer release on GitHub shows up in the app.
-VERSION = "1.5"
+VERSION = "1.6"
 RELEASES = "https://github.com/ips610/headroom/releases"
 
 APPLICATIONS = "/Applications"
@@ -73,6 +74,15 @@ BUILD_MIN_KB = 20 * 1024   # same idea for build folders inside projects
 DAY = 24 * 60 * 60
 IDLE = 5 * 60              # the server stops this long after the page goes quiet
 RECENT = 7 * DAY           # used this recently: ticking a whole section leaves it out
+GIT_MIN_KB = 500 * 1024    # a .git folder this big is worth packing with `git gc`
+GREW_KB = 100 * 1024       # "What grew": growth under 100 MB is not worth a line
+SIZES_DAYS = 30            # how long the sizes of each day's scan are kept for "What grew"
+SHOT_AGE = 30 * DAY        # screenshots newer than this: ticking the whole section leaves them out
+MODEL_MIN_KB = 100 * 1000 * 1000 // 1024     # loose model files under 100 MB aren't listed
+MODEL_RECENT = 30 * DAY    # a model used this recently: ticking the whole section leaves it out
+ARCHIVE_MIN_KB = 20 * 1000 * 1000 // 1024    # nor archives under 20 MB
+PACKED_MIN_KB = 100 * 1000 * 1000 // 1024    # a plain .gz, .bz2 or .xz is often one data file: only at 100 MB
+MANY = 5                   # more archives in one folder, or model files of one name, than this share a row
 SAFE_GROUPS = ("apps", "temp")   # what "Safe clean" ticks, with installers older than a month
 
 # Folder names worth a plainer label, and the section they belong in.
@@ -98,8 +108,10 @@ BUNDLES = {"com.todesktop.230313mzl4w4u92": "Cursor", "ai.elementlabs.lmstudio":
 # Apple's caches without the com.apple. prefix: macOS looks after them like the rest.
 APPLE_CACHES = {"CloudKit", "FamilyCircle", "GeoServices"}
 
-# ~/.cache is disposable by convention, but LM Studio keeps its model library there.
-NOT_CACHE = ("lm-studio",)
+# ~/.cache is disposable by convention, but LM Studio keeps its model library there. Hugging Face
+# and PyTorch keep models there too: scan_models() lists those one by one, and the rest beside them.
+NOT_CACHE = ("lm-studio", "huggingface", "torch")
+CONDAS = ("anaconda3", "miniconda3", "miniforge3")
 
 # What a Chromium-based app (Slack, VS Code, Notion ...) keeps beside its real data.
 CHROMIUM_CACHES = (
@@ -199,9 +211,10 @@ def count(number, one, many):
     return f"{number} {one if number == 1 else many}"
 
 
-def ago(when):
-    """A timestamp as people say it: today, 3 weeks ago, 2 years ago."""
-    days = (time.time() - when) / DAY
+def ago(when, calendar=False):
+    """A timestamp as people say it: today, 3 weeks ago, 2 years ago. With `calendar` it goes by
+    the date, so "today" is only ever today's date, not yesterday evening seen in the morning."""
+    days = (datetime.date.today() - datetime.date.fromtimestamp(when)).days if calendar else (time.time() - when) / DAY
     if days < 1:
         return "today"
     if days < 2:
@@ -219,29 +232,81 @@ def children(folder, skip=()):
     return [os.path.join(folder, n) for n in sorted(names) if n not in skip and n != ".DS_Store"]
 
 
-def _du(paths):
+def find_sizer():
+    """The app's own folder measurer (launcher/size.swift), which prints what `du -sk` prints many
+    times faster. It sits beside the launcher in the app; HEADROOM_SIZE points at one built
+    elsewhere. None from ./run.sh or an app built without a Swift compiler: then du measures."""
+    # Only inside an app bundle (…/Contents/Resources or Frameworks): from a plain folder there is
+    # no telling what a MacOS folder next door holds.
+    in_app = os.path.basename(os.path.dirname(HERE)) == "Contents"
+    beside = [os.path.join(HERE, "..", "MacOS", "headroom-size")] if in_app else []
+    beside += [os.path.join(os.path.dirname(sys.executable), "headroom-size")] if FROZEN else []
+    for candidate in [os.environ.get("HEADROOM_SIZE", "")] + beside:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return os.path.realpath(candidate)
+    return None
+
+
+SIZER = find_sizer()
+
+
+def measured_lines(output, asked):
+    """{path: kb} from "kb<TAB>path" lines, for the paths that were asked about and no others. A
+    folder name can hold a line break and a made-up "size<TAB>path" after it, and callers delete
+    what comes back from here."""
     sizes = {}
-    for start in range(0, len(paths), 400):
-        batch = paths[start:start + 400]
-        asked = set(batch)
-        with DU_SLOTS:
-            done = run(["/usr/bin/du", "-sk", "--"] + batch)
-        for line in done.stdout.splitlines():
-            kb, _, path = line.partition("\t")
-            # Only what was asked about. A folder name can hold a line break and a made-up
-            # "size<TAB>path" after it, and callers delete what comes back from here.
-            if kb.strip().isdigit() and path in asked:
-                sizes[path] = int(kb)
+    # Split at line feeds only: splitlines() also breaks at U+2028 and its kin, which a folder
+    # name may hold, and the rest of that name would then read as another folder's line.
+    for line in output.split("\n"):
+        kb, _, path = line.partition("\t")
+        if kb.strip().isdigit() and path in asked:
+            sizes[path] = int(kb)
     return sizes
 
 
-def du(paths):
-    """Kilobytes on disk for every path that exists, as {path: kb}."""
+PARTLY = set()      # paths du gave a number for without getting through all of them
+SKIPPED = re.compile(r"^(?:du|headroom-size): (.+): (.+)$", re.M)
+EXPECTED = ("Permission denied", "Operation not permitted", "No such file or directory")
+
+
+def _du(paths, complaints=None):
+    sizes = {}
+    for start in range(0, len(paths), 400):
+        batch = paths[start:start + 400]
+        PARTLY.difference_update(batch)
+        with DU_SLOTS:
+            if SIZER:
+                try:
+                    done = run([SIZER, "--"] + batch)
+                    sizes.update(measured_lines(done.stdout, set(batch)))
+                    if complaints is not None:
+                        complaints.append(done.stderr)
+                except OSError:
+                    pass
+            # The measurer prints no line for a path it isn't sure of: du measures those.
+            rest = [p for p in batch if p not in sizes]
+            if rest:
+                done = run(["/usr/bin/du", "-sk", "--"] + rest)
+                sizes.update(measured_lines(done.stdout, set(rest)))
+                if complaints is not None:
+                    complaints.append(done.stderr)
+                # du prints a number even when it could not get into part of a folder for another
+                # reason than "not allowed" (a name too long, say). That number is too small.
+                for inside, why in SKIPPED.findall(done.stderr):
+                    if why not in EXPECTED:
+                        PARTLY.update(p for p in rest if inside == p or inside.startswith(p + os.sep))
+    return sizes
+
+
+def du(paths, complaints=None):
+    """Kilobytes on disk for every path that exists, as {path: kb}. With `complaints`, a list
+    that gets what the measuring programs said on stderr (the folders they were not let into)."""
     paths = [p for p in paths if os.path.lexists(p)]
-    shares = [s for s in (paths[i::6] for i in range(6)) if s]
+    # The measurer works on several threads by itself; du gets six processes.
+    shares = [paths] if SIZER and paths else [s for s in (paths[i::6] for i in range(6)) if s]
     sizes = {}
     with ThreadPoolExecutor(6) as pool:
-        for part in pool.map(_du, shares):
+        for part in pool.map(lambda share: _du(share, complaints), shares):
             sizes.update(part)
     return sizes
 
@@ -258,7 +323,18 @@ def item(group, name, paths, kb, detail="", cmd=None, quit=None, blocked=""):
         "safe": False,       # "Safe clean" may tick it
         "tidy": False,       # worth a line even under MIN_KB: clutter you'd still want gone
         "trash": False,      # goes to the Trash through Finder, not straight off (your own data)
+        "git": "",           # a repository `cmd` packs with `git gc`: checked first, measured before and after
+        "rank": 0,           # rows with a higher rank come first in their section, before bigger ones
+        "weighs": 0,         # what a row without a size of its own is sorted by (a .git folder's size)
+        "same": "",          # what "What grew" knows a row by when its name and paths change (a count in the name)
+        "seen": {},          # path -> the kind of file the scan saw there; checked again before it moves
     }
+
+
+class Unsure(str):
+    """A scan's notice when it could not look properly (Spotlight or another program did not
+    answer). It reads like any other notice, and may be empty; "What grew" takes that day's sizes
+    for the source as unknown instead of as nothing there."""
 
 
 def readable(folder_name):
@@ -345,6 +421,7 @@ def cache_rows(folder, group, skip=()):
     if small:
         name = count(len(small), "smaller cache", "smaller caches")
         rows.append(item(group, name, small, sum(sizes[p] for p in small), tilde(folder)))
+        rows[-1]["same"] = "small:" + folder
     return rows
 
 
@@ -488,6 +565,82 @@ def scan_temp():
     return [item("temp", "Old temporary files", old, sum(du(old).values()), detail)]
 
 
+# --- copies of itself a scripted browser leaves behind ------------------------------------------------
+
+CLONE_NAMES = {"com.google.chrome": "Chrome", "com.google.chrome.for.testing": "Chrome for Testing",
+               "org.chromium.chromium": "Chromium", "com.microsoft.edgemac": "Edge", "com.brave.browser": "Brave"}
+
+
+def clone_root():
+    """The X folder beside the per-user temp folder, where a Chromium browser keeps the copy of
+    itself it runs from: X/<bundle id>.code_sign_clone/code_sign_clone.XXXXXX."""
+    return os.path.join(os.path.dirname(TMP), "X")
+
+
+def is_clone(path):
+    """True for exactly X/<bundle id>.code_sign_clone/code_sign_clone.<something>, and nothing else in X."""
+    parent = os.path.dirname(path)
+    return (os.path.dirname(parent) == clone_root() and parent.endswith(".code_sign_clone")
+            and os.path.basename(path).startswith("code_sign_clone."))
+
+
+def clones_in_use(paths):
+    """The browser copies among these paths that a running program was started from: a running
+    browser runs from its copy. Real paths on both sides, because /var is a link to /private/var
+    and a program can be listed under either spelling."""
+    clones = [path for path in paths if is_clone(path)]
+    if not clones:
+        return set()
+    running, files = [], set()
+    for program in program_paths():
+        running.append(os.path.realpath(program))
+        try:
+            info = os.stat(program)
+        except OSError:
+            continue
+        files.add((info.st_dev, info.st_ino))
+    busy = set()
+    for path in clones:
+        real = os.path.realpath(path)
+        # The copy's program is a hard link to the app's own, and the kernel names a running
+        # program by either of them. So the file itself decides, not only where it is.
+        programs = [p for app in children(path) for p in children(os.path.join(app, "Contents", "MacOS"))]
+        for program in programs:
+            try:
+                info = os.stat(program)
+            except OSError:
+                continue
+            if (info.st_dev, info.st_ino) in files:
+                busy.add(path)
+        if any(r.startswith(real + os.sep) for r in running):
+            busy.add(path)
+    return busy
+
+
+def scan_browser_copies():
+    """A Chromium browser started by a script (Selenium, Puppeteer, Playwright) copies itself, about
+    1 GB by `du`, and leaves the copy behind when the script kills it. One row a browser, holding
+    only the copies no running program was started from. A browser with none to spare gets no row."""
+    rows = []
+    for folder in children(clone_root()):
+        if not folder.endswith(".code_sign_clone") or os.path.islink(folder):
+            continue
+        copies = [p for p in children(folder) if is_clone(p) and os.path.isdir(p) and not os.path.islink(p)]
+        busy = clones_in_use(copies)
+        unused = [p for p in copies if p not in busy]
+        ident = os.path.basename(folder)[:-len(".code_sign_clone")]
+        if unused:
+            # They are APFS clones: `du` counts each in full, and how much comes back isn't known before they go.
+            row = item("temp", f"Browser copies left by automated {CLONE_NAMES.get(ident.lower(), ident)}",
+                       unused, sum(du(unused).values()),
+                       "Selenium, Puppeteer and Playwright leave a copy of the browser behind on every run. "
+                       f"{count(len(unused), 'unused copy', 'unused copies')}: frees up to the size shown.")
+            row["note"] = f"{len(busy)} in use, left alone." if busy else ""
+            row["same"] = "copies:" + ident
+            rows.append(row)
+    return rows
+
+
 @functools.lru_cache(maxsize=None)
 def developer_dir():
     return run(["/usr/bin/xcode-select", "-p"]).stdout.strip()
@@ -508,11 +661,9 @@ def scan_dev_tools():
         ("Dart analysis cache", [home(".dartServer", ".analysis-driver")], None),
         ("Rust crate downloads", [home(".cargo", "registry"), home(".cargo", "git")], None),
         ("Xcode build data", children(os.path.join(xcode, "DerivedData")), xcode_open),
-        ("Xcode device support files", [os.path.join(xcode, f"{system} DeviceSupport")
-                                        for system in ("iOS", "macOS", "watchOS", "tvOS", "visionOS")], None),
         ("Simulator caches", [home("Library", "Developer", "CoreSimulator", "Caches")], None),
     ]
-    for conda in ("anaconda3", "miniconda3", "miniforge3"):
+    for conda in CONDAS:
         # Only the downloaded archives: the unpacked packages are linked into environments.
         tarballs = [p for p in children(home(conda, "pkgs")) if p.endswith((".conda", ".tar.bz2"))]
         table.append(("Conda package downloads", tarballs, None))
@@ -538,14 +689,55 @@ def scan_dev_tools():
     for editor, folder, pattern in EDITORS:
         table.append((f"Old {editor} extension versions", old_extensions(home(folder, "extensions")),
                       (f"Quit {editor} first", [pattern])))
-    sizes = du([p for _, paths, _ in table for p in paths])
+    # Rows that say what they are: name, paths, quit, then what it is and what you lose, and why
+    # ticking the whole section leaves it out ('' when it doesn't).
+    table.append(("Xcode previews", children(os.path.join(xcode, "UserData", "Previews")), xcode_open,
+                  "What SwiftUI previews built, and the simulators that draw them. Xcode makes them again "
+                  "when you open a preview.", ""))
+    table += device_support(xcode)
+    sizes = du([p for _, paths, *_ in table for p in paths])
     rows = []
-    for name, paths, quit in table:
+    for name, paths, quit, *told in table:
         present = [p for p in paths if p in sizes]
         if present:
-            rows.append(item("dev", name, present, sum(sizes[p] for p in present),
-                             tilde(os.path.commonpath(present)), quit=quit))
+            what, left_out = told or ("", "")
+            row = item("dev", name, present, sum(sizes[p] for p in present),
+                       f"{what} {tilde(os.path.commonpath(present))}".strip(), quit=quit)
+            if left_out:
+                row["recent"], row["note"] = True, left_out
+            rows.append(row)
     return rows + go_rows()
+
+
+def support_version(path):
+    """'iPhone15,2 17.4.1 (21E236)' -> (17, 4, 1). A folder with no version in its name counts as the oldest."""
+    found = re.search(r"(?:^| )(\d+(?:\.\d+)*)(?: |$)", os.path.basename(path))
+    return tuple(int(n) for n in found.group(1).split(".")) if found else ()
+
+
+def device_support(xcode):
+    """Symbols Xcode copies off every iPhone, iPad, Watch, Apple TV or Vision Pro it meets: a folder
+    for each system version, a few GB apiece. For each system, the versions before the newest two
+    are one row. The newest two, the ones your devices are most likely on, are a row of their own
+    that ticking the whole section leaves out."""
+    rows = []
+    for system in ("iOS", "macOS", "watchOS", "tvOS", "visionOS"):
+        folders = [p for p in children(os.path.join(xcode, f"{system} DeviceSupport"))
+                   if os.path.isdir(p) and not os.path.islink(p)]
+        newest = sorted({support_version(p) for p in folders}, reverse=True)[:2]
+        old = [p for p in folders if support_version(p) not in newest]
+        new = [p for p in folders if support_version(p) in newest]
+        if old:
+            rows.append((f"Old {system} device support", old, None,
+                         f"Symbols Xcode copied from devices on older {system} versions "
+                         f"({count(len(old), 'folder', 'folders')}). It copies them again when such a device is "
+                         "plugged in.", ""))
+        if new:
+            rows.append((f"Newest {system} device support", new, None,
+                         f"Symbols Xcode copied from devices on the newest {system} versions. It copies them "
+                         "again when a device is plugged in, which takes a few minutes.",
+                         "The two newest versions, so ticking the whole section leaves it out."))
+    return rows
 
 
 def old_extensions(folder):
@@ -583,16 +775,21 @@ def load_json(path, default):
         return default
 
 
-def go_rows():
-    """Go's module downloads. They are read-only on disk, so Go itself removes them."""
+def go_caches():
+    """(the go program, [its module cache, its build cache]); (None, []) without Go."""
     go = next((g for g in ("/opt/homebrew/bin/go", "/usr/local/go/bin/go", "/usr/local/bin/go")
                if os.access(g, os.X_OK)), None)
     if not go:
-        return []
+        return None, []
     try:
-        found = run([go, "env", "GOMODCACHE", "GOCACHE"], timeout=20).stdout.splitlines()
+        return go, run([go, "env", "GOMODCACHE", "GOCACHE"], timeout=20).stdout.splitlines()
     except (OSError, subprocess.TimeoutExpired):
-        return []
+        return go, []
+
+
+def go_rows():
+    """Go's module downloads. They are read-only on disk, so Go itself removes them."""
+    go, found = go_caches()
     rows = []
     for path, name, flag in zip(found, ("Go module downloads", "Go build cache"), ("-modcache", "-cache")):
         # The build cache usually sits in ~/Library/Caches, which App caches already lists.
@@ -648,7 +845,7 @@ def scan_simulators():
         devices = simulator_devices(simctl, folder)
     except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
         return [item("dev", "Simulators that no longer open", [], 0, detail,
-                     blocked="Xcode's simulator service did not answer. Scan again in a minute.")]
+                     blocked="Xcode's simulator service did not answer. Scan again in a minute.")], Unsure()
     dead = [d["udid"] for group in devices.values() for d in group if not d.get("isAvailable")]
     live = [(runtime, d) for runtime, group in devices.items() for d in group if d.get("isAvailable")]
     # A booted simulator runs launchd_sim with its own folder on the command line.
@@ -670,6 +867,7 @@ def scan_simulators():
         name = count(len(dead), "simulator that no longer opens", "simulators that no longer open")
         rows.append(item("dev", name, paths, sum(sizes.get(p, 0) for p in paths), detail,
                          cmd=[simctl, "delete", "unavailable"]))
+        rows[-1]["same"] = "simulators:gone"
     for runtime, device in live:
         path = os.path.join(folder, device["udid"])
         system = runtime.rsplit(".", 1)[-1].replace("-", " ", 1).replace("-", ".")   # iOS-27-0 -> iOS 27.0
@@ -707,7 +905,7 @@ def scan_docker():
         lines = None
     if lines is None:
         builds["blocked"] = images["blocked"] = "Start Docker to measure this"
-        return [builds, images]
+        return [builds, images], Unsure()
     for line in lines:
         kind, _, reclaimable = line.partition("\t")
         if kind == "Build Cache":
@@ -717,26 +915,44 @@ def scan_docker():
     return [builds, images] + docker_leftovers(docker)
 
 
+OLLAMAS = ("/usr/local/bin/ollama", "/opt/homebrew/bin/ollama", "/Applications/Ollama.app/Contents/Resources/ollama")
+LEFT_OUT = "Added or changed in the last 30 days, so ticking the whole section leaves it out."
+IMPORTED = "Goes to the Trash, in case you added it yourself."
+
+
 def ollama_rows():
-    ollama = next((p for p in ("/usr/local/bin/ollama", "/opt/homebrew/bin/ollama",
-                               "/Applications/Ollama.app/Contents/Resources/ollama") if os.access(p, os.X_OK)), None)
-    if not ollama or not os.path.isdir(home(".ollama", "models")):
-        return []
+    """(Ollama's models, one row each and removed by Ollama itself; whether Ollama answered).
+    Without the program, its whole store is one row."""
+    store = home(".ollama", "models")
+    ollama = next((p for p in OLLAMAS if os.access(p, os.X_OK)), None)
+    if not os.path.isdir(store) or os.path.islink(store):
+        return [], True
+    if not ollama:
+        paths = children(store)
+        row = item("models", "Ollama models", paths, sum(du(paths).values()),
+                   f"Every model in Ollama's store. Ollama can pull them again. {tilde(store)}",
+                   quit=("Quit Ollama first", [r"(^|/)ollama( |$)"]))
+        # Without the program there is no telling a pulled model from one made here: to the Trash.
+        row["trash"], row["note"] = True, IMPORTED
+        return ([row] if all(deletable(p) for p in paths) else []), True
     try:
         listed = run([ollama, "list"], timeout=20)
     except subprocess.TimeoutExpired:
         listed = None
     if not listed or listed.returncode:
-        return [item("big", "Ollama models", [], 0, "~/.ollama/models", blocked="Open Ollama to see its models")]
+        return [item("models", "Ollama models", [], 0, "~/.ollama/models", blocked="Open Ollama to see its models")], False
     rows = []
     for line in listed.stdout.splitlines()[1:]:
         found = re.match(r"^(\S+)\s+[0-9a-f]{12}\s+([\d.]+\s*[kKMGT]?B)\s+(.*)$", line.strip())
         if found:
             name, size, used = found.groups()
-            rows.append(item("big", f"Ollama model {name}", [], size_kb(size.replace("K", "k")),
-                             f"Last changed {used.strip()}. `ollama pull {name}` brings it back.",
-                             cmd=[ollama, "rm", name]))
-    return rows
+            row = item("models", f"Ollama model {name}", [], size_kb(size.replace("K", "k")),
+                       f"Last changed {used.strip()}. Run ollama pull {name} to get it back.",
+                       cmd=[ollama, "rm", name])
+            if not re.search(r"month|year", used):
+                row["recent"], row["note"] = True, LEFT_OUT
+            rows.append(row)
+    return rows, True
 
 
 def scan_big():
@@ -759,18 +975,13 @@ def scan_big():
     for ndk in children(os.path.join(sdk, "ndk")):
         rows.append((f"Android NDK {os.path.basename(ndk)}", [ndk],
                      "Gradle downloads the version a project asks for when it builds.", None))
-    for root in (home(".cache", "lm-studio", "models"), home(".lmstudio", "models")):
-        for model in [m for publisher in children(root) for m in children(publisher)]:
-            rows.append((f"LM Studio model {os.path.basename(model)}", [model],
-                         "LM Studio can download it again.", None))
     for archive in [a for day in children(home("Library", "Developer", "Xcode", "Archives"))
                     for a in children(day) if a.endswith(".xcarchive")]:
         rows.append((f"Xcode archive {os.path.basename(archive)[:-len('.xcarchive')]}", [archive],
                      "Only needed to read crash reports from that build.", None))
     sizes = du([p for _, paths, _, _ in rows for p in paths])
-    found = [item("big", name, paths, sum(sizes.get(p, 0) for p in paths), f"{note} {tilde(paths[0])}", quit=quit)
-             for name, paths, note, quit in rows]
-    return found + ollama_rows()
+    return [item("big", name, paths, sum(sizes.get(p, 0) for p in paths), f"{note} {tilde(paths[0])}", quit=quit)
+            for name, paths, note, quit in rows]
 
 
 # --- project build folders ----------------------------------------------------------------------
@@ -823,6 +1034,16 @@ def git():
     return next((g for g in found if os.access(g, os.X_OK)), None)
 
 
+def git_command(program, root, *args):
+    """A git command line for a repository headroom did not make and does not trust. git runs
+    programs a repository names (a file-system monitor, hooks, an ext:: transport) and can fetch
+    what a partial clone lacks: none of that happens, and nothing is asked for on the terminal.
+    Every git call goes through here."""
+    return ["/usr/bin/env", "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1", program,
+            "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.ext.allow=never",
+            "-C", root, *args]
+
+
 def git_tracked(folders):
     """The build folders that hold files git tracks (a committed `dist` is source, not output),
     and the ones git could not check. One `git ls-files` per repository."""
@@ -839,7 +1060,7 @@ def git_tracked(folders):
             continue
         relative = [os.path.relpath(f, root) for f in inside]
         try:
-            done = run([program, "-C", root, "ls-files", "-z", "--"] + relative, timeout=30)
+            done = run(git_command(program, root, "ls-files", "-z", "--", *relative), timeout=30)
         except (OSError, subprocess.TimeoutExpired):
             unchecked.update(inside)
             continue
@@ -852,6 +1073,77 @@ def git_tracked(folders):
             if any(name.startswith(prefix) for name in listed):
                 tracked.add(folder)
     return tracked, unchecked
+
+
+GC_KEEPS = "Commits you can reach stay; git may remove unreachable ones older than its grace period."
+GC_SETTINGS = r"^(gc\.recentobjectshook|extensions\.partialclone|remote\..*\.promisor)$"
+
+
+def git_busy(root):
+    """Why `git gc` must not run in a repository right now: '' when nothing in it is half-done and
+    nothing about it is out of the ordinary. Asked when the row is listed and again just before
+    the command runs."""
+    store = os.path.join(root, ".git")
+    if os.path.islink(store) or not os.path.isdir(store) or not deletable(store):
+        return "Its .git folder isn't a plain folder inside your home folder, so headroom leaves it alone."
+    # A repository that keeps its objects somewhere else: packing here could strand the other one.
+    if any(os.path.islink(os.path.join(store, name)) for name in ("objects", "refs")) or os.path.lexists(
+            os.path.join(store, "commondir")):
+        return "Its .git folder shares its contents with another place, so headroom leaves it alone."
+    worktrees = [p for p in children(os.path.join(store, "worktrees")) if os.path.isdir(p) and not os.path.islink(p)]
+    for folder in [store] + worktrees:      # linked worktrees keep their own state
+        try:
+            names = set(os.listdir(folder))
+        except OSError:
+            return "headroom could not look inside its .git folder."
+        if names & {"rebase-merge", "rebase-apply"}:
+            return "A rebase is half-done here. Finish or abort it first."
+        if names & {"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"}:
+            return "A merge, cherry-pick, revert or bisect is half-done here. Finish it first."
+        if "gc.pid" in names or any(name.endswith(".lock") for name in names):
+            return "Git is at work in this repository (it holds a lock). Try again when it's done."
+    for _, folders, names in os.walk(os.path.join(store, "refs")):
+        if any(name.endswith(".lock") for name in folders + names):
+            return "Git is at work in this repository (it holds a lock). Try again when it's done."
+    # Reading the settings runs nothing. A program the repository names for gc would run, and a
+    # partial clone could go to the network for what it lacks: neither is for headroom to start.
+    program = git()
+    try:
+        done = run(git_command(program, root, "config", "--get-regexp", GC_SETTINGS), timeout=20) if program else None
+    except (OSError, subprocess.TimeoutExpired):
+        done = None
+    if done is None or done.returncode not in (0, 1):
+        return "headroom could not read this repository's settings, so it leaves it alone."
+    if "recentobjectshook" in done.stdout.lower():
+        return "This repository runs a program of its own during git gc, so headroom leaves it alone."
+    if done.stdout.strip():
+        return "This is a partial clone, which git gc could try to fill in from the network. headroom leaves it alone."
+    return ""
+
+
+def git_rows(folders):
+    """The repositories the build folders sit in whose .git has grown big. `git gc` packs it:
+    headroom runs that one command and removes nothing in there itself. What it saves isn't known
+    until it has run, so the row carries no size; the result says what .git was and is."""
+    program = git()
+    stores = {os.path.join(root, ".git"): root for root in {repo_root(f) for f in folders} if root}
+    stores = {store: root for store, root in stores.items() if os.path.isdir(store) and not os.path.islink(store)}
+    big = {store: kb for store, kb in sorted(du(list(stores)).items()) if kb >= GIT_MIN_KB} if program else {}
+    names = collections.Counter(os.path.basename(stores[store]) for store in big)
+    rows = []
+    for store, kb in big.items():
+        root = stores[store]
+        label = os.path.basename(root)
+        if names[label] > 1:        # two repositories of one name: say whose
+            label = os.path.join(os.path.basename(os.path.dirname(root)), label)
+        row = item("dev", f"{label} git history", [], 0,
+                   f"git gc packs its {size_text(kb)} .git folder into fewer files. {GC_KEEPS} {tilde(store)}",
+                   cmd=git_command(program, root, "gc", "--quiet"))
+        # No paths to tell two repositories of one name apart by, so the id is made from where it is.
+        row["id"] = hashlib.sha1(("git\0" + root).encode()).hexdigest()[:16]
+        row["git"], row["tidy"], row["weighs"] = root, True, kb
+        rows.append(row)
+    return rows
 
 
 def last_activity(folder, beside=True, budget=400):
@@ -914,6 +1206,7 @@ def scan_builds():
                 row["recent"] = True
                 row["note"] = "Used this week, so ticking the whole section leaves it out."
             rows.append(row)
+    rows += git_rows(folders)       # the same projects, no second walk
     notes = []
     if shut:
         notes.append(f"macOS did not let headroom look inside {', '.join(shut)}. Allow it in System Settings, "
@@ -1032,6 +1325,332 @@ def scan_installers():
             row["note"] = "Downloaded this week, so ticking the whole section leaves it out."
         rows.append(row)
     return rows
+
+
+# --- screenshots and screen recordings ---------------------------------------------------------------
+
+SHOT_TYPES = (".png", ".jpg", ".jpeg", ".heic", ".tiff", ".tif", ".gif", ".bmp", ".pdf")
+CLIP_TYPES = (".mov", ".mp4")
+
+
+def capture_setting(key):
+    """One of macOS's screenshot settings (`defaults read com.apple.screencapture <key>`); '' when not set."""
+    try:
+        done = run(["/usr/bin/defaults", "read", "com.apple.screencapture", key], timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def capture_folder():
+    """Where macOS saves screenshots: the folder in its settings, or the Desktop when none is set."""
+    chosen = capture_setting("location")
+    if chosen == "~" or chosen.startswith("~/"):
+        chosen = HOME + chosen[1:]
+    return os.path.normpath(chosen) if chosen.startswith("/") else home("Desktop")
+
+
+def flagged_captures(paths):
+    """(The files Spotlight says macOS's own screen capture made: kMDItemIsScreenCapture is 1,
+    whether it answered for every file asked about)."""
+    found, answered = set(), True
+    for start in range(0, len(paths), 400):
+        batch = paths[start:start + 400]
+        try:
+            done = run(["/usr/bin/mdls", "-raw", "-name", "kMDItemIsScreenCapture"] + batch, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            answered = False
+            continue
+        answers = done.stdout.split("\0")       # one for every file, in order
+        if len(answers) == len(batch):          # any other count can't be matched to the files
+            found.update(path for path, answer in zip(batch, answers) if answer.strip() == "1")
+        else:
+            answered = False
+    return found, answered
+
+
+def capture_names():
+    """The names macOS gives its own captures, without the ending: 'Screenshot 2026-08-14 at
+    10.32.11', 'Screen Recording 2026-08-14 at 10.32.11 AM', or the name chosen in its settings in
+    place of 'Screenshot'. Always with the date and the time, so a file someone called
+    screenshot.png isn't one."""
+    names = ["Screenshot", "Screen Shot", "Screen Recording"] + [n for n in [capture_setting("name")] if n]
+    return re.compile(r"(?:%s) \d{4}-\d\d-\d\d \S{1,12} \d{1,2}\.\d\d\.\d\d(?:[   ]\S{1,6}){0,3}"
+                      % "|".join(re.escape(name) for name in names))
+
+
+def scan_screenshots():
+    """Screenshots and screen recordings macOS made, in the one folder it saves them to and never
+    its subfolders. A row for each month, newest first; the last 30 days are a row that ticking the
+    whole section leaves out. They are yours, not a cache, so every row goes to the Trash."""
+    folder, shut = capture_folder(), []
+    if os.path.realpath(folder) != folder or not deletable(os.path.join(folder, "x")):
+        return [], (f"macOS saves screenshots in {tilde(folder)}, which isn't a plain folder inside your home "
+                    "folder, so headroom leaves them alone.")
+    files = []
+    for path in listing(folder, shut, tilde(folder)):
+        if path.lower().endswith(SHOT_TYPES + CLIP_TYPES) and not os.path.basename(path).startswith("."):
+            try:
+                info = os.lstat(path)
+            except OSError:
+                continue
+            # A file itself: not a folder, not a link to one elsewhere, and not one that is only in
+            # iCloud, which moving would download first.
+            if stat.S_ISREG(info.st_mode) and not dataless(info):
+                files.append((path, info))
+    (flagged, answered), named = flagged_captures([path for path, _ in files]), capture_names()
+    groups = {}
+    for path, info in files:
+        if path in flagged or named.fullmatch(os.path.splitext(os.path.basename(path))[0]):
+            made = getattr(info, "st_birthtime", info.st_mtime)
+            kind = "Screen recordings" if path.lower().endswith(CLIP_TYPES) else "Screenshots"
+            month = time.strftime("%Y-%m", time.localtime(made)) if made < time.time() - SHOT_AGE else ""
+            groups.setdefault((kind, month), []).append((path, info))
+    rows = []
+    for (kind, month), found in sorted(groups.items()):
+        when = time.strftime("%B %Y", time.strptime(month, "%Y-%m")) if month else "the last 30 days"
+        row = item("shots", f"{kind} from {when}", [path for path, _ in found],
+                   sum(info.st_blocks * 512 // 1024 for _, info in found),
+                   f"{count(len(found), 'file', 'files')} · {tilde(folder)}")
+        row["trash"], row["recent"] = True, not month
+        row["note"] = "" if month else "From the last 30 days, so ticking the whole section leaves it out."
+        row["rank"] = int(month.replace("-", "")) if month else 999999       # by month, the newest first
+        row["seen"] = {path: stat.S_IFMT(info.st_mode) for path, info in found}
+        rows.append(row)
+    if shut:
+        return rows, (f"macOS did not let headroom look inside {shut[0]}. Allow it in System Settings, under "
+                      "Privacy & Security, Files and Folders, then scan again.")
+    # Spotlight not answering, or knowing nothing about files that are named like screenshots,
+    # leaves only the names to go by. macOS names them in the Mac's own language.
+    if files and (not answered or (rows and not flagged)):
+        return rows, ("Spotlight had nothing to say about these files, so headroom went by their names. "
+                      "Screenshots that macOS named in another language than English may be missing.")
+    return rows, ""
+
+
+# --- model weights and archives: Spotlight finds them, and every hit is checked ----------------------
+
+MODEL_TYPES = (".gguf", ".safetensors", ".ckpt", ".pt", ".pth", ".onnx", ".keras", ".tflite", ".mlmodel")
+MODEL_MAYBE = (".bin", ".h5")                       # any kind of data: a model only where the folder says so
+MODEL_PACKAGES = (".mlpackage", ".mlmodelc")        # Core ML models that are folders
+ARCHIVE_TYPES = (".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".zip", ".tar", ".7z", ".rar")
+PACKED_TYPES = (".gz", ".bz2", ".xz")
+HF_DOWNLOADS = ("datasets", "modules", "metrics", "assets", "xet")      # in ~/.cache/huggingface, beside hub
+
+
+def spotlight(endings, min_kb, also=()):
+    """What Spotlight knows in the home folder with one of these endings and at least this size,
+    plus anything ending in `also` whatever its size (Spotlight has no size for a folder). It
+    answers from its index, so the disk isn't walked again. None when it did not answer."""
+    query = "kMDItemFSSize >= %d && (%s)" % (min_kb * 1024, " || ".join(f'kMDItemFSName == "*{e}"c' for e in endings))
+    query += "".join(f' || kMDItemFSName == "*{e}"c' for e in also)
+    try:
+        done = run(["/usr/bin/mdfind", "-0", "-onlyin", HOME, query], timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return None if done.returncode else [path for path in done.stdout.split("\0") if path]
+
+
+def spoken_for(path):
+    """True inside a folder another section offers, or that a tool needs whole: a project's build
+    folder (node_modules beside package.json and so on), a conda install, a Flutter SDK, wherever
+    they are. The same tests the walk for build folders uses."""
+    here = os.path.dirname(path)
+    while len(here) > len(HOME):
+        proof = PROJECT_DIRS.get(os.path.basename(here))
+        if ((proof and os.path.exists(os.path.join(os.path.dirname(here), proof)))
+                or os.path.isdir(os.path.join(here, "conda-meta")) or os.path.exists(os.path.join(here, "bin", "flutter"))):
+            return True
+        here = os.path.dirname(here)
+    return False
+
+
+def loose(hits, taken=()):
+    """Spotlight's hits that headroom may offer, as [(path, lstat)]. Spotlight is only a hint: each
+    one must really be there, a file or folder itself (never a link) at least two levels inside the
+    home folder and not reached through a link, and not kept only in iCloud. Left out: ~/Library,
+    hidden folders (.git, .cache, the Trash), node_modules and virtualenvs, anything inside an app
+    or another package (the Photos library), a conda or Flutter install, a project's build folder,
+    and whatever is `taken`: paths other rows already offer."""
+    found = []
+    for path in sorted(set(hits)):
+        if not path.startswith(HOME + os.sep) or os.path.normpath(path) != path or not deletable(path):
+            continue
+        parts = path[len(HOME) + 1:].split(os.sep)
+        if (parts[0] == "Library" or any(part.startswith(".") for part in parts)
+                or any(part in SKIP_ANYWHERE or part == "node_modules"
+                       or part.lower().endswith(PACKAGES + MODEL_PACKAGES) for part in parts[:-1])
+                or any(path == t or path.startswith(t + os.sep) for t in taken) or spoken_for(path)):
+            continue
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)) and not dataless(info):
+            found.append((path, info))
+    return found
+
+
+def model_stores():
+    """Models that tools keep in stores of their own, one model a row where the store keeps them
+    apart: [(name, path, how it comes back, whether it may be one you put there yourself)].
+    Hugging Face and torch.hub only hold what they downloaded. LM Studio, GPT4All and Jan also take
+    models you import, so theirs go to the Trash. A store reached through a link is left out:
+    headroom clears nothing by way of a link."""
+    again, found = "Downloads again when a tool asks for it.", []
+    for folder in children(home(".cache", "huggingface", "hub")):
+        if os.path.basename(folder).startswith("models--"):
+            label = os.path.basename(folder)[len("models--"):].replace("--", "/")
+            found.append((f"Hugging Face model {label}", folder, again, False))
+    for path in children(home(".cache", "torch", "hub", "checkpoints")):
+        found.append((f"PyTorch checkpoint {os.path.basename(path)}", path, again, False))
+    for root in (home(".cache", "lm-studio", "models"), home(".lmstudio", "models")):
+        for model in [m for publisher in children(root) for m in children(publisher)]:
+            found.append((f"LM Studio model {os.path.basename(model)}", model, "LM Studio can download it again.", True))
+    for path in children(home("Library", "Application Support", "nomic.ai", "GPT4All")):
+        if path.lower().endswith((".gguf", ".bin")) and os.path.isfile(path):
+            found.append((f"GPT4All model {os.path.basename(path)}", path, "GPT4All can download it again.", True))
+    for root in (home("jan", "models"), home("Library", "Application Support", "Jan", "data", "models")):
+        for model in children(root):
+            found.append((f"Jan model {os.path.basename(model)}", model, "Jan can download it again.", True))
+    return [entry for entry in found if not os.path.islink(entry[1]) and deletable(entry[1])]
+
+
+def store_paths():
+    """Everything the model stores hold, for the scans that must not list it a second time."""
+    return [path for _, path, _, _ in model_stores()] + [home(".ollama"), home("jan", "models")]
+
+
+def weight_bin(path):
+    """.bin and .h5 are any kind of data. One counts as a model only where it plainly is: beside a
+    config.json or tokenizer.json, or in a folder named models or checkpoints."""
+    folder = os.path.dirname(path)
+    named = {part.lower() for part in folder[len(HOME) + 1:].split(os.sep)} & {"models", "checkpoints"}
+    return bool(named) or any(os.path.isfile(os.path.join(folder, n)) for n in ("config.json", "tokenizer.json"))
+
+
+def scan_models():
+    """Model weights: what tools keep in their stores, and model files of 100 MB or more anywhere
+    else in the home folder. One of those may be a model you trained, which nothing can download
+    again, so they go to the Trash. A path is in one row only: Spotlight's hits inside a store are
+    left to the store's rows."""
+    month_ago = time.time() - MODEL_RECENT
+    stores = model_stores()
+    cache = home(".cache", "huggingface")
+    hub, torch_hub = os.path.join(cache, "hub"), home(".cache", "torch", "hub")
+    # Beside the models: only what is known to be a download. Anything else in those folders
+    # (another tool's own data, your Hugging Face login) is not headroom's to offer.
+    rest = [("Hugging Face downloads", [os.path.join(cache, name) for name in HF_DOWNLOADS]
+             + [p for p in children(hub) if os.path.basename(p).startswith(("datasets--", "spaces--", ".locks"))],
+             "Datasets and other downloads. Models and your login stay.", cache),
+            ("PyTorch downloads", [p for p in children(torch_hub) if os.path.isfile(os.path.join(p, "hubconf.py"))],
+             "Code that torch.hub downloaded. Models stay.", torch_hub)]
+    rest = [(name, [p for p in paths if not os.path.islink(p) and deletable(p)], what, where)
+            for name, paths, what, where in rest]
+    sizes = du([path for _, path, _, _ in stores] + [p for _, paths, _, _ in rest for p in paths])
+    rows = []
+    for name, path, how, yours in stores:
+        if path in sizes:
+            when = max(os.lstat(path).st_mtime, last_activity(path, beside=False))
+            row = item("models", name, [path], sizes[path], f"{how} {tilde(path)} · last changed {ago(when)}")
+            row["recent"], row["trash"] = when > month_ago, yours
+            row["note"] = " ".join(([LEFT_OUT] if row["recent"] else []) + ([IMPORTED] if yours else []))
+            rows.append(row)
+    for name, paths, what, where in rest:
+        present = [p for p in paths if p in sizes]
+        if present:
+            rows.append(item("dev", name, present, sum(sizes[p] for p in present), f"{what} {tilde(where)}"))
+    ollama, answered = ollama_rows()
+    rows += ollama
+    hits = spotlight(MODEL_TYPES + MODEL_MAYBE, MODEL_MIN_KB, also=MODEL_PACKAGES)
+    if hits is None:
+        return rows, Unsure("Spotlight did not answer, so headroom could not look for model files outside the "
+                            "tools' own folders. Scan again in a minute.")
+    files = loose(hits, taken=store_paths())
+    packages = du([path for path, info in files if stat.S_ISDIR(info.st_mode) and path.lower().endswith(MODEL_PACKAGES)])
+    named = {}
+    for path, info in files:
+        low = path.lower()
+        if stat.S_ISDIR(info.st_mode) and low.endswith(MODEL_PACKAGES):
+            kb, when = packages.get(path, 0), max(info.st_mtime, last_activity(path, beside=False))
+        elif stat.S_ISREG(info.st_mode) and (low.endswith(MODEL_TYPES) or (low.endswith(MODEL_MAYBE) and weight_bin(path))):
+            kb, when = info.st_blocks * 512 // 1024, max(info.st_mtime, getattr(info, "st_birthtime", 0))
+        else:
+            continue
+        if kb >= MODEL_MIN_KB:
+            named.setdefault(os.path.basename(path), []).append((path, kb, when, stat.S_IFMT(info.st_mode)))
+    for base, found in sorted(named.items()):
+        # A training run can leave the same file name in a hundred folders: those are one row.
+        for group in [found] if len(found) > MANY else [[one] for one in found]:
+            paths, newest = [path for path, *_ in group], max(when for _, _, when, _ in group)
+            if len(group) > 1:
+                common = os.path.commonpath([os.path.dirname(path) for path in paths])
+                where = "your home folder" if common == HOME else os.path.basename(common)
+                row = item("models", f"{len(group)} files named {base} in {where}", paths, sum(kb for _, kb, _, _ in group),
+                           f"{tilde(common)} · newest added or changed {ago(newest)}")
+                row["same"] = f"named:{base}:{common}"
+            else:
+                folder = os.path.dirname(paths[0])
+                row = item("models", f"{os.path.basename(folder)} / {base}", paths, group[0][1],
+                           f"{tilde(folder)} · added or changed {ago(newest)}")
+            row["trash"], row["seen"] = True, {path: kind for path, _, _, kind in group}
+            if newest > month_ago:
+                row["recent"], row["note"] = True, LEFT_OUT
+            elif any(repo_root(os.path.dirname(path)) for path in paths):
+                # A model in a project is more likely part of the project than a leftover.
+                row["recent"], row["note"] = True, "Inside a git project, so ticking the whole section leaves it out."
+            row["note"] = f"{row['note']} Goes to the Trash, in case you trained it yourself.".strip()
+            rows.append(row)
+    return rows, "" if answered else Unsure("")
+
+
+def scan_archives():
+    """Archives of 20 MB or more (a plain .gz, .bz2 or .xz from 100 MB) that Spotlight knows in the
+    home folder. Zipped apps and installers in Downloads and on the Desktop stay under Installer
+    files and are left out here, and so is anything inside a git project (fixtures, test data) or a
+    model store. An archive with a folder of its own name beside it looks unzipped already: those
+    come first. Its contents are never read. Every row goes to the Trash."""
+    hits = spotlight(ARCHIVE_TYPES + PACKED_TYPES, min(ARCHIVE_MIN_KB, PACKED_MIN_KB))
+    if hits is None:
+        return [], Unsure("Spotlight did not answer, so headroom could not look for archives. Scan again in a minute.")
+    groups = {}
+    for path, info in loose(hits, taken=find_installers() + store_paths() + go_caches()[1]):
+        low, kb = path.lower(), info.st_blocks * 512 // 1024
+        ending = next((e for e in ARCHIVE_TYPES if low.endswith(e)), None)
+        if not ending:
+            ending = next((e for e in PACKED_TYPES if low.endswith(e)), None)
+            kb = kb if kb >= PACKED_MIN_KB else 0
+        if not ending or kb < ARCHIVE_MIN_KB or not stat.S_ISREG(info.st_mode) or repo_root(os.path.dirname(path)):
+            continue
+        base = os.path.basename(path)[:-len(ending)]
+        beside = os.path.join(os.path.dirname(path), base)
+        kind = "" if not base or os.path.islink(beside) else "folder" if os.path.isdir(beside) else (
+            "file" if os.path.isfile(beside) else "")
+        groups.setdefault((os.path.dirname(path), bool(kind)), []).append((path, kb, base, kind, info))
+    rows = []
+    for (folder, unzipped), found in sorted(groups.items()):
+        if len(found) > MANY:       # a folder full of them is one row, not hundreds
+            names = [os.path.basename(path) for path, *_ in found]
+            row = item("archives", f"{len(found)} archives {'already unzipped ' if unzipped else ''}in {os.path.basename(folder)}",
+                       [path for path, *_ in found], sum(kb for _, kb, *_ in found),
+                       f"{tilde(folder)} · {', '.join(names[:3])} and {len(names) - 3} more")
+            row["note"] = "Each has a folder or file of its own name next to it." if unzipped else ""
+            row["same"] = f"archives:{folder}:{unzipped}"
+            made = [row]
+        else:
+            made = []
+            for path, kb, base, kind, info in found:
+                row = item("archives", f"{os.path.basename(folder)} / {os.path.basename(path)}", [path], kb,
+                           f"{tilde(folder)} · added {ago(getattr(info, 'st_birthtime', info.st_mtime))}")
+                row["note"] = f"A {kind} named {base} is next to it." if kind else ""
+                made.append(row)
+        for row in made:
+            row["trash"], row["rank"] = True, int(unzipped)
+        rows += made
+    by_path = {path: stat.S_IFMT(info.st_mode) for found in groups.values() for path, _, _, _, info in found}
+    for row in rows:
+        row["seen"] = {path: by_path[path] for path in row["paths"]}
+    return rows, ""
 
 
 # --- qBittorrent ---------------------------------------------------------------------------------
@@ -1179,6 +1798,7 @@ def scan_qbittorrent():
         if paths:
             row = item(group, name, paths, sum(du(paths).values()), detail, quit=QBIT)
             row["tidy"] = tidy
+            row["same"] = "torrents" if group == "installers" else ""      # its name holds a count
             rows.append(row)
 
     add("temp", "qBittorrent logs", children(os.path.join(support, "logs")), tilde(os.path.join(support, "logs")))
@@ -1282,8 +1902,12 @@ def scan_homebrew():
     try:
         cleanup = run(brew_command(brew, "cleanup", "-n", "--prune=all"), timeout=600)
         autoremove = run(brew_command(brew, "autoremove", "-n"), timeout=300)
+        failed = bool(cleanup.returncode or autoremove.returncode)
     except (OSError, subprocess.TimeoutExpired):
-        return [item("dev", "Homebrew old versions", [], 0, prefix, blocked="Homebrew did not answer. Scan again later.")]
+        failed = True
+    if failed:      # no answer is not "nothing to clean"
+        return [item("dev", "Homebrew old versions", [], 0, prefix,
+                     blocked="Homebrew did not answer. Scan again later.")], Unsure()
     kb, found = 0, 0
     for line in cleanup.stdout.splitlines():
         match = re.match(r"^Would remove: (.+?) \((?:[\d,]+ files?, )?([\d.]+\s*[kKMGT]?B)\)$", line.strip())
@@ -1294,6 +1918,7 @@ def scan_homebrew():
                          f"{count(found, 'older version or leftover', 'older versions and leftovers')} Homebrew keeps. "
                          f"The packages you use stay. {prefix}",
                          cmd=brew_command(brew, "cleanup", "--prune=all"), quit=BREW_BUSY))
+        rows[-1]["same"] = "homebrew:old"
     names, listing_started = [], False
     for line in autoremove.stdout.splitlines():
         if line.startswith("==> Would autoremove"):
@@ -1500,7 +2125,7 @@ def scan_leftovers():
         detail = ", ".join(names[:8]) + (f" and {len(names) - 8} more" if len(names) > 8 else "")
         rows.append(item("leftovers", count(len(small), "app with small leftovers", "apps with small leftovers"),
                          [p for r in small for p in r["paths"]], sum(r["kb"] for r in small), detail))
-        rows[-1]["tidy"] = True
+        rows[-1]["tidy"], rows[-1]["same"] = True, "leftovers:small"
     else:
         rows += small
     return rows
@@ -1511,8 +2136,10 @@ def scan_leftovers():
 SOURCES = {
     "logs": (("temp",), scan_logs),
     "temp": (("temp",), scan_temp),
+    "browser_copies": (("temp",), scan_browser_copies),
     "trash": (("trash",), scan_trash),
     "installers": (("installers",), scan_installers),
+    "screenshots": (("shots",), scan_screenshots),
     "caches": (("apps", "dev"), scan_caches),
     "app_data": (("apps",), scan_app_data),
     "app_extras": (("apps",), scan_app_extras),
@@ -1523,11 +2150,17 @@ SOURCES = {
     "home_cache": (("dev",), scan_home_cache),
     "docker": (("dev", "big"), scan_docker),
     "big": (("big",), scan_big),
+    "models": (("models", "dev"), scan_models),
+    "archives": (("archives",), scan_archives),
     "dev_tools": (("dev",), scan_dev_tools),
     "simulators": (("dev", "big"), scan_simulators),
-    "builds": (("builds",), scan_builds),
+    "builds": (("builds", "dev"), scan_builds),     # and the big .git folders of the same projects
     "homebrew": (("dev",), scan_homebrew),      # slow: Homebrew's dry runs take a while
 }
+
+# Sources that wait on another program, which can take its time (Homebrew's dry runs take about
+# 20 seconds): the page calls the scan finished without them and fills their rows in as they land.
+SLOW = {"homebrew": "Homebrew", "docker": "Docker", "simulators": "the simulators"}
 
 FOUND = {}   # source -> {id: row}. The only things a delete will touch.
 LOCK = threading.Lock()
@@ -1542,13 +2175,26 @@ def blocked(row, running):
         return row["blocked"]
     if row["quit"] and any(re.search(p, running, re.I | re.M) for p in row["quit"][1]):
         return row["quit"][0]
+    return git_busy(row["git"]) if row["git"] else ""
+
+
+def stays_put(row):
+    """Why a row can't be cleaned while "Move cleaned files to the Trash" is on: '' when its files
+    can go there. Nothing is removed for good in that mode, so what only a command can remove
+    stays, and so does what is in the Trash already."""
+    if row["cmd"]:
+        return "Can't go to the Trash, so it waits while Move to Trash is on. Switch that off under Maintenance to clear it."
+    if any(path.startswith(home(".Trash") + os.sep) for path in row["paths"]):
+        return "It is the Trash already, so it waits while Move to Trash is on. Switch that off under Maintenance to empty it."
     return ""
 
 
-def public(row, running):
+def public(row, running, to_trash=False):
     return {"id": row["id"], "group": row["group"], "name": row["name"], "detail": row["detail"],
-            "kb": row["kb"], "blocked": blocked(row, running), "note": row["note"],
-            "recent": row["recent"], "safe": row["safe"] or row["group"] in SAFE_GROUPS, "trash": row["trash"]}
+            "kb": row["kb"], "blocked": blocked(row, running) or (stays_put(row) if to_trash else ""),
+            "note": row["note"], "recent": row["recent"], "safe": row["safe"] or row["group"] in SAFE_GROUPS,
+            "trash": row["trash"], "action": "git gc" if row["git"] else "", "rank": row["rank"],
+            "weighs": row["weighs"]}
 
 
 # --- rows you asked never to see again, and what has gone ---------------------------------------
@@ -1652,7 +2298,7 @@ def unprotected(rows):
     return out
 
 
-def remember(what, section, paths, kb, result, error="", command=None):
+def remember(what, section, paths, kb, result, error="", command=None, note=""):
     """One line in the history: append-only, one JSON object per line."""
     entry = {"at": now(), "what": what, "section": section,
              "paths": [tilde(p) for p in paths], "kb": kb, "result": result}
@@ -1660,6 +2306,8 @@ def remember(what, section, paths, kb, result, error="", command=None):
         entry["command"] = " ".join(command)
     if error:
         entry["error"] = error
+    if note:
+        entry["note"] = note
     with STATE_LOCK:
         try:
             os.makedirs(os.path.dirname(history_file()), exist_ok=True)
@@ -1686,19 +2334,158 @@ def history(limit=400):
     return out
 
 
+SCANNING = {}   # source -> the scan of it that is running now, which later callers wait for
+
+
 def scan(source):
+    """Scan one source for the page. A second call while the first is still running (the page
+    reloaded, "Scan again") waits for that one and gets its answer: the programs behind a slow
+    source are never started twice over."""
+    with LOCK:
+        mine = SCANNING.get(source)
+        first = mine is None
+        if first:
+            mine = SCANNING[source] = {"done": threading.Event(), "result": None, "error": None}
+    if not first:
+        mine["done"].wait()
+        if mine["error"]:
+            raise mine["error"]
+        return mine["result"]
+    try:
+        mine["result"] = scan_once(source)
+        return mine["result"]
+    except OSError as error:
+        mine["error"] = error
+        raise
+    finally:
+        with LOCK:
+            SCANNING.pop(source, None)
+        mine["done"].set()
+
+
+def scan_once(source):
     found = SOURCES[source][1]()
     rows, notice = found if isinstance(found, tuple) else (found, "")
-    rows = [r for r in unprotected(rows) if r["kb"] >= MIN_KB or r["blocked"] or r["tidy"]]
+    rows = unprotected(rows)
+    for row in rows:
+        # du gave a number without getting through all of it (see _du): not to be read as the size.
+        row["partly"] = bool(PARTLY.intersection(row["paths"]))
+        if row["partly"]:
+            row["note"] = f"{row['note']} At least this much: part of it could not be measured.".strip()
+    rows = [r for r in rows if r["kb"] >= MIN_KB or r["blocked"] or r["tidy"] or r["partly"]]
     with LOCK:
         FOUND[source] = {r["id"]: r for r in rows}
-    running = processes()
-    result = {"items": [public(r, running) for r in rows], "notice": notice}
+    running, to_trash = processes(), settings()["trash"]
+    result = {"items": [public(r, running, to_trash) for r in rows], "notice": notice}
     with STATE_LOCK:
         last = load_state("last-scan.json", {})
         last[source] = {"at": time.time(), **result}
         save_state("last-scan.json", last)
+    keep_sizes(source, rows, failed=isinstance(notice, Unsure))
     return result
+
+
+# --- what grew: the sizes each day's scan measured ------------------------------------------------
+
+def day_of(when):
+    return time.strftime("%Y-%m-%d", time.localtime(when))
+
+
+def saved_sizes(today):
+    """{day: {source: {row: [section, name, kb]}}} as sizes.json holds it: days that are dates, and
+    none after today (a clock that was wrong for a while must not become the newest scan for good)."""
+    days = load_state("sizes.json", {})
+    kept = {}
+    for day, sources in days.items() if isinstance(days, dict) else ():
+        try:
+            datetime.date.fromisoformat(day)
+        except ValueError:
+            continue
+        if len(day) == 10 and day <= today and isinstance(sources, dict):
+            kept[day] = sources
+    return kept
+
+
+def keep_sizes(source, rows, when=None, failed=False):
+    """Remember what a scan of one source measured, for "What grew". One snapshot a day: a later
+    scan the same day replaces it, and days over 30 days old are dropped, so the file stays small.
+    A row is kept under what stays the same about it (`same`, else its id). A row the scan could
+    not measure (Docker was off, say) is kept without a size, and a source whose scan `failed`
+    without any: an unknown must not read as 0 and then as growth a week later."""
+    when = time.time() if when is None else when
+    day, oldest = day_of(when), day_of(when - SIZES_DAYS * DAY)
+    with STATE_LOCK:
+        days = saved_sizes(max(day, day_of(time.time())))
+        today = days[day] if isinstance(days.get(day), dict) else {}
+        today[source] = None if failed else {
+            r["same"] or r["id"]: [r["group"], r["name"], None if r["blocked"] or r.get("partly") else r["kb"]] for r in rows}
+        days[day] = today
+        save_state("sizes.json", {d: sources for d, sources in days.items() if d >= oldest})
+
+
+def keep_found(ids):
+    """After a delete: the day's sizes for the sources those rows came from, as they are now."""
+    with LOCK:
+        touched = {source: list(found.values()) for source, found in FOUND.items() if ids & set(found)}
+    for source, rows in touched.items():
+        keep_sizes(source, rows)
+
+
+def sized(rows):
+    """One source's saved rows as {row: [section, name, kb or None]}, or None when the scan failed
+    that day or the entry isn't what keep_sizes() wrote. A row that isn't is left out."""
+    if not isinstance(rows, dict):
+        return None
+    return {key: entry for key, entry in rows.items()
+            if isinstance(entry, list) and len(entry) == 3 and isinstance(entry[0], str) and isinstance(entry[1], str)
+            and (entry[2] is None or isinstance(entry[2], int))}
+
+
+def growth(now=None):
+    """What grew since about a week ago: {span, sections: {section: kb}, top: [...]}. Each source's
+    newest sizes against an earlier day's. That day is the oldest one 5 to 9 days before the newest
+    scan ("this week"). With none in that range it is the nearest older day, else the oldest newer
+    one, and `span` says how many days back that is. With no earlier day there is nothing to
+    compare: span is '' and no numbers. A source, or a single row, that could not be measured on
+    either day is left out, so it never reads as growth."""
+    days = saved_sizes(day_of(time.time() if now is None else now))
+    latest = max(days, default="")
+    back = {d: (datetime.date.fromisoformat(latest) - datetime.date.fromisoformat(d)).days for d in days if d < latest}
+    week = [d for d in back if 5 <= back[d] <= 9]
+    older = [d for d in back if back[d] > 9]
+    base = min(week) if week else max(older) if older else min(back, default="")
+    if not base:
+        return {"span": "", "sections": {}, "top": []}
+    span = "this week" if week else "in " + count(back[base], "day", "days")
+    sections, grown_rows = collections.Counter(), []
+    for source in {source for day in days if day > base for source in days[day]}:
+        # The newest day that scanned this source: a later day may hold only what a delete touched.
+        newest = max(day for day in days if day > base and source in days[day])
+        before, after = sized(days[base].get(source)), sized(days[newest][source])
+        if before is None or after is None:
+            continue
+        # A row that holds many paths gets a new id when one of them changes: then its name finds it.
+        by_name = {(group, name): key for key, (group, name, _) in before.items() if key not in after}
+        matched = set()
+        for key, (group, name, kb) in after.items():
+            old = key if key in before else by_name.get((group, name))
+            matched.add(old)
+            if kb is None or (old is not None and before[old][2] is None):
+                continue
+            was = before[old][2] if old is not None else 0
+            sections[group] += kb - was
+            if kb - was >= GREW_KB:
+                grown_rows.append({"name": name, "group": group, "kb": kb - was, "new": old is None})
+        for key, (group, _, kb) in before.items():
+            if key not in matched and kb is not None:
+                sections[group] -= kb       # it was there then and isn't now
+    grown = {group: kb for group, kb in sections.items() if kb >= GREW_KB}
+    # A section's own line only when none of its rows is listed: the same growth isn't said twice.
+    listed = {entry["group"] for entry in grown_rows}
+    top = grown_rows + [{"name": "", "group": group, "kb": kb, "new": False}     # '' is the section itself
+                        for group, kb in grown.items() if group not in listed]
+    top.sort(key=lambda entry: (-entry["kb"], entry["name"].lower()))
+    return {"span": span, "sections": grown, "top": top[:8]}
 
 
 def forget_last(ids):
@@ -1720,14 +2507,23 @@ def last_scan():
 
 def deletable(path):
     """A second lock behind the scan: only inside the home folder (two levels down at least)
-    or the per-user temp folder, and never by way of a symlinked parent."""
+    or the per-user temp folder, and never by way of a symlinked parent. Beside the temp folder,
+    only a browser's left-behind copy of itself (see is_clone): nothing else in X."""
     real = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
     if real != path:
         return False
+    if is_clone(path):
+        return True
     for root, depth in ((HOME, 2), (TMP, 1)):
         if path.startswith(root + os.sep) and len(os.path.relpath(path, root).split(os.sep)) >= depth:
             return True
     return False
+
+
+def sentence(text):
+    """What the system said, as a sentence: "Too many open files" gets its full stop."""
+    text = str(text).strip()
+    return text if not text or text[-1] in ".!?" else text + "."
 
 
 def first_line(text):
@@ -1743,11 +2539,20 @@ def removal_error(stderr, stuck):
     return first_line(stderr) or "Some files could not be removed."
 
 
-def delete(row):
-    why = blocked(row, processes())
+def delete(row, to_trash=False):
+    """Clear one row. With `to_trash` (the switch in Maintenance) its paths go to the Trash through
+    Finder and nothing is removed for good: no `rm`, and no row that only a command can clear."""
+    why = blocked(row, processes()) or (stays_put(row) if to_trash else "")
     if why:
-        return {"freed_kb": 0, "left_kb": row["kb"], "errors": [why]}
-    errors, said = [], None
+        return {"freed_kb": 0, "left_kb": row["kb"], "errors": [why], "note": ""}
+    errors, said, note = [], None, ""
+    store = os.path.join(row["git"], ".git") if row["git"] else None
+    before = sum(du([store]).values()) if store else 0
+    busy = clones_in_use(row["paths"])      # asked again now: a browser may have started since the scan
+    if busy:
+        errors.append(f"{count(len(busy), 'copy is', 'copies are')} in use by a running browser, so "
+                      f"{'it' if len(busy) == 1 else 'they'} stayed.")
+    paths = [path for path in row["paths"] if path not in busy]
     if row["cmd"]:
         try:
             done = run(row["cmd"], timeout=3600)
@@ -1756,15 +2561,34 @@ def delete(row):
             said = re.search(r"Total[^\n]*?([\d.]+\s*[kMGT]?B)", done.stdout)
         except (OSError, subprocess.TimeoutExpired):
             errors.append("The clean-up command did not finish.")
-    elif row["trash"]:
-        for path in row["paths"]:
-            why = "" if trashable(path) else f"Left alone, it is outside the folders this tool clears: {tilde(path)}"
-            why = why or finder_trash(path)
-            if why:
-                errors.append(why)
+    elif row["trash"] or to_trash:
+        going = []
+        for path in paths:
+            seen = row["seen"].get(path)
+            try:
+                kind = stat.S_IFMT(os.lstat(path).st_mode)
+            except OSError:
+                kind = None
+            if seen is not None and kind != seen:
+                # One of your own files: only the very thing the scan looked at goes.
+                errors.append(f"Left alone, it is not what the scan found there any more: {tilde(path)}")
+            elif kind == stat.S_IFLNK and not row["trash"]:
+                pass        # a link among cache folders: Finder would move what it points at, so it just stays
+            elif not trashable(path):
+                errors.append(f"Left alone, it is outside the folders this tool clears: {tilde(path)}")
+            else:
+                going.append(path)
+        for start in range(0, len(going), TRASH_BATCH):
+            if start and JOB["stopping"]:       # asked before the next batch, never after the last one
+                errors.append("Stopped before all of it was moved.")
+                break
+            whys = [why for why in finder_trash_many(going[start:start + TRASH_BATCH]).values() if why]
+            errors += whys
+            if NO_FINDER in whys or NOT_ALLOWED in whys:
+                break       # the rest of the row would only hear the same
     else:
         allowed = []
-        for path in row["paths"]:
+        for path in paths:
             if deletable(path):
                 allowed.append(path)
             else:
@@ -1779,8 +2603,11 @@ def delete(row):
     else:
         left = row["kb"] if errors else 0
     freed = size_kb(said.group(1)) if said else max(row["kb"] - left, 0)
+    if store:
+        after = sum(du([store]).values())
+        freed, note = max(before - after, 0), f".git was {size_text(before)} and is {size_text(after)} now."
     row["kb"] = left
-    return {"freed_kb": freed, "left_kb": left, "errors": errors[:3]}
+    return {"freed_kb": freed, "left_kb": left, "errors": list(dict.fromkeys(errors))[:3], "note": note}
 
 
 def disk():
@@ -1790,7 +2617,7 @@ def disk():
 
 # The one delete run at a time, as the page's progress bar reads it.
 JOB = {"running": False, "stopping": False, "total_kb": 0, "done_kb": 0, "item_kb": 0,
-       "index": 0, "count": 0, "current": None, "results": []}
+       "index": 0, "count": 0, "current": None, "results": [], "trash": False}
 
 
 def free_kb():
@@ -1803,7 +2630,7 @@ def watch_item(size, before, finished):
         JOB["item_kb"] = max(JOB["item_kb"], min(size, free_kb() - before))
 
 
-def run_job(rows):
+def run_job(rows, to_trash=False):
     for index, row in enumerate(rows):
         if JOB["stopping"]:
             break
@@ -1812,47 +2639,79 @@ def run_job(rows):
         finished = threading.Event()
         threading.Thread(target=watch_item, args=(size, free_kb(), finished), daemon=True).start()
         try:
-            result = delete(row)
+            result = delete(row, to_trash)
         except OSError as error:
-            result = {"freed_kb": 0, "left_kb": size, "errors": [error.strerror or str(error)]}
+            result = {"freed_kb": 0, "left_kb": size, "errors": [sentence(error.strerror or error)], "note": ""}
         finished.set()
         errors = result["errors"]
+        trashed = bool(row["trash"] or to_trash)
         outcome = "failed" if errors and not result["freed_kb"] else "partly" if errors else (
-            "trashed" if row["trash"] else "deleted")
+            "compacted" if row["git"] else "trashed" if trashed else "deleted")
+        # A git command is kept the short way: its real line is three settings and two paths long.
+        command = ["git", "-C", tilde(row["git"]), "gc"] if row["git"] else row["cmd"]
         remember(row["name"], row["group"], row["paths"], result["freed_kb"], outcome,
-                 errors[0] if errors else "", row["cmd"])
-        JOB["results"].append({"id": row["id"], "name": row["name"], **result})
+                 errors[0] if errors else "", command, result["note"])
+        JOB["results"].append({"id": row["id"], "name": row["name"], "trashed": trashed, **result})
         JOB.update(done_kb=JOB["done_kb"] + size, item_kb=0)
     forget_last({r["id"] for r in JOB["results"] if r["left_kb"] < MIN_KB})
+    keep_found({r["id"] for r in JOB["results"]})
     JOB.update(running=False, current=None)
 
 
 # --- moving things to the Trash ------------------------------------------------------------------
 
-# Finder moves the item and asks for an administrator password itself when the item needs one.
-# The path travels as an argument, never inside the script text.
+# Finder moves each item and asks for an administrator password itself when one needs it. The
+# paths travel as arguments, never inside the script text. One line comes back for each of them:
+# 0 when it went, or Finder's error number.
 TRASH_SCRIPT = """on run argv
-set target to (POSIX file (item 1 of argv)) as alias
-tell application "Finder" to delete target
+set answers to ""
+repeat with one in argv
+try
+set theItem to (POSIX file (contents of one)) as alias
+tell application "Finder" to delete theItem
+set answers to answers & "0" & linefeed
+on error number code
+set answers to answers & code & linefeed
+end try
+end repeat
+return answers
 end run"""
+# The variable must not be called `target`: that is a word of Finder's own, and inside the tell
+# Finder looks up its own "target" instead of the file (error -1728). Only the real Finder shows it.
+TRASH_BATCH = 100       # paths handed to Finder in one go: one osascript for them, not one each
+NO_FINDER = "Finder did not answer."
+NOT_ALLOWED = ("headroom isn't allowed to control Finder. Allow it in System Settings, Privacy & Security, "
+               "Automation, then try again.")
+FINDER_SAYS = {"-128": "You cancelled, so it stayed.", "-1743": NOT_ALLOWED, "-43": "It was already gone.",
+               "-1700": "It was already gone."}       # no file there to make an alias of
+
+
+def finder_trash_many(paths):
+    """Move files and folders to the Trash through Finder, all in one call. {path: '' when it
+    went, else why not}. A link is never handed over: `as alias` follows it, and Finder would move
+    what it points at, wherever that is. A call that fails as a whole says so for every path."""
+    whys = {path: f"Left alone, it is a link and Finder would move what it points at: {tilde(path)}"
+            for path in paths if os.path.islink(path)}
+    going = [path for path in paths if path not in whys]
+    if not going:
+        return whys
+    try:
+        done = run(["/usr/bin/osascript", "-e", TRASH_SCRIPT] + going, timeout=900)
+    except (OSError, subprocess.TimeoutExpired):
+        return {**whys, **dict.fromkeys(going, NO_FINDER)}
+    answers = [line.strip() for line in done.stdout.split("\n") if line.strip()]
+    if done.returncode or len(answers) != len(going):
+        # Not one answer for each: nothing can be matched to its path, so none is taken as moved.
+        why = next((text for code, text in FINDER_SAYS.items() if code in done.stderr), "")
+        return {**whys, **dict.fromkeys(going, why or sentence(first_line(done.stderr) or "Finder could not move it"))}
+    for path, code in zip(going, answers):
+        whys[path] = "" if code == "0" else FINDER_SAYS.get(code, f"Finder could not move it (error {code}).")
+    return whys
 
 
 def finder_trash(path):
     """Move one file or folder to the Trash through Finder. '' when it went, else why not."""
-    try:
-        done = run(["/usr/bin/osascript", "-e", TRASH_SCRIPT, path], timeout=900)
-    except (OSError, subprocess.TimeoutExpired):
-        return "Finder did not answer."
-    if done.returncode == 0:
-        return ""
-    if "-128" in done.stderr:
-        return "You cancelled, so it stayed."
-    if "-1743" in done.stderr:
-        return ("headroom may not control Finder. Allow it in System Settings, Privacy & Security, "
-                "Automation, then try again.")
-    if "-43" in done.stderr:
-        return "It was already gone."
-    return first_line(done.stderr) or "Finder could not move it."
+    return finder_trash_many([path])[path]
 
 
 def in_applications(path):
@@ -1930,7 +2789,7 @@ def list_apps():
         when = used.get(app["path"], "").strip()
         try:
             opened = calendar.timegm(time.strptime(when[:19], "%Y-%m-%d %H:%M:%S"))   # mdls says +0000
-            last, last_on = ago(opened), time.strftime("%-d %b %Y", time.localtime(opened))
+            last, last_on = ago(opened, calendar=True), time.strftime("%-d %b %Y", time.localtime(opened))
         except ValueError:
             last = last_on = ""
         out.append({
@@ -1973,17 +2832,25 @@ SIZES = {}      # folder -> (when, listing), so going back up is instant
 SIZES_FOR = 10 * 60
 
 
+DENIED = re.compile(r"^(?:du|headroom-size): (.+): (?:Permission denied|Operation not permitted)$", re.M)
+
+
 def du_children(folder):
     """Each thing a folder holds with its size, the total, and the paths du was not let into."""
-    done = run(["/usr/bin/du", "-k", "-d", "1", "--", folder])     # folders; macOS du can't add -a here
     inside = children(folder)
-    known = {folder, *inside}
-    sizes = {}
-    for line in done.stdout.splitlines():
-        kb, _, path = line.partition("\t")
-        if kb.strip().isdigit() and path in known:                  # as in _du: no made-up lines
-            sizes[path] = int(kb)
-    total = sizes.pop(folder, None)
+    folders = [p for p in inside if os.path.isdir(p) and not os.path.islink(p)]
+    if SIZER and folders:
+        said = []
+        sizes = du(folders, said)       # 400 at a time, and du for what the measurer leaves out
+        # The folder itself as one thing, so a file with names in two subfolders counts once.
+        # ponytail: that walks it a second time; a mode in size.swift that prints a folder's
+        # children and its total from one walk would halve this.
+        total = du([folder]).get(folder)
+        complaints = "\n".join(said)
+    else:
+        done = run(["/usr/bin/du", "-k", "-d", "1", "--", folder])     # folders; macOS du can't add -a here
+        sizes, complaints = measured_lines(done.stdout, {folder, *inside}), done.stderr     # as in _du: no made-up lines
+        total = sizes.pop(folder, None)
     for path in inside:                                             # files, from their own blocks
         try:
             info = os.lstat(path)
@@ -1992,8 +2859,7 @@ def du_children(folder):
         if not stat.S_ISDIR(info.st_mode):
             sizes[path] = info.st_blocks * 512 // 1024
     total = sum(sizes.values()) if total is None else total
-    denied = re.findall(r"^du: (.+): (?:Permission denied|Operation not permitted)$", done.stderr, re.M)
-    return sizes, total, denied
+    return sizes, total, list(dict.fromkeys(DENIED.findall(complaints)))
 
 
 def can_trash(path):
@@ -2285,7 +3151,7 @@ STARTUP = {}    # id -> the item the last listing showed: the only ones that can
 OWN_AGENTS = {"local.headroom.door": "headroom", "local.headroom.watch": "headroom",
               "local.localhost.door": "headroom and harbor", "local.harbor": "harbor"}
 EXPLAIN = (     # label prefix -> what it does, in one line
-    ("local.headroom.door", "Lets you open headroom by typing headroom.localhost:8460."),
+    ("local.headroom.door", "Lets you open headroom by typing headroom.localhost."),
     ("local.headroom.watch", "Checks free space every half hour, and reminds you about Safe clean."),
     ("local.localhost.door", "Lets plain headroom.localhost and harbor.localhost open their apps."),
     ("local.harbor", "Starts harbor."),
@@ -2402,7 +3268,22 @@ def settings():
     saved = saved if isinstance(saved, dict) else {}
     gb = saved.get("alert_gb", 20)
     return {"alert": saved.get("alert", True) is not False, "weekly": saved.get("weekly", True) is not False,
-            "alert_gb": gb if isinstance(gb, int) and 1 <= gb <= 1000 else 20}
+            "alert_gb": gb if isinstance(gb, int) and 1 <= gb <= 1000 else 20,
+            "trash": saved.get("trash") is True}     # cleaned files go to the Trash, not straight off: off unless chosen
+
+
+def settings_broken():
+    """True when settings.json is there but can't be read as settings. Then nobody knows whether
+    cleaned files were meant to go to the Trash, and a delete must not guess."""
+    path = os.path.join(state_dir(), "settings.json")
+    if not os.path.lexists(path):
+        return False
+    try:
+        with open(path) as handle:
+            saved = json.load(handle)
+    except (OSError, ValueError):
+        return True
+    return not isinstance(saved, dict) or not isinstance(saved.get("trash", False), bool)
 
 
 def newest_release():
@@ -2510,7 +3391,8 @@ def add_sample(free_kb, when=None):
             pass
 
 
-SAFE_SOURCES = ("caches", "app_data", "app_extras", "sandboxed", "logs", "temp", "installers", "qbittorrent")
+SAFE_SOURCES = ("caches", "app_data", "app_extras", "sandboxed", "logs", "temp", "browser_copies", "installers",
+                "qbittorrent")
 
 
 def measure_safe():
@@ -2568,7 +3450,7 @@ def space_history():
         pass
     marks = []
     for entry in reversed(history(limit=3000)):
-        if entry.get("result") not in ("deleted", "trashed", "partly") or not entry.get("kb"):
+        if entry.get("result") not in ("deleted", "trashed", "compacted", "partly") or not entry.get("kb"):
             continue
         try:
             when = datetime.datetime.fromisoformat(str(entry["at"])).timestamp()
@@ -2869,23 +3751,26 @@ class Handler(BaseHTTPRequestHandler):
         DEADLINE = time.time() + IDLE
         if url.path == "/api/start":
             add_sample(disk()["free_kb"])           # one reading per scan, for the History chart
-            sources = [{"id": name, "groups": list(groups)} for name, (groups, _) in SOURCES.items()]
-            return self.reply(200, {"sources": sources, "disk": disk(), "last": last_scan()})
+            sources = [{"id": name, "groups": list(groups), "slow": SLOW.get(name, "")}
+                       for name, (groups, _) in SOURCES.items()]
+            return self.reply(200, {"sources": sources, "disk": disk(), "last": last_scan(),
+                                    "trash": settings()["trash"]})
         if url.path == "/api/progress":
             return self.reply(200, {**JOB, "disk": disk()})
         if url.path == "/api/blocked":
             # Asked when the page comes back into view: an app may have been quit meanwhile.
-            running = processes()
+            # Or the Move to Trash switch was flipped, which changes what can be cleared.
+            running, to_trash = processes(), settings()["trash"]
             with LOCK:
                 rows = [r for found in FOUND.values() for r in found.values()]
-            return self.reply(200, {r["id"]: blocked(r, running) for r in rows})
+            return self.reply(200, {r["id"]: blocked(r, running) or (stays_put(r) if to_trash else "") for r in rows})
         if url.path == "/api/scan":
             source = query.get("source", [""])[0]
             if source in SOURCES:
                 try:
                     return self.reply(200, scan(source))
                 except OSError as error:    # a Mac out of processes cannot even start `du`
-                    return self.reply(500, {"error": error.strerror or str(error)})
+                    return self.reply(500, {"error": sentence(error.strerror or error)})
         if url.path == "/api/protected":
             return self.reply(200, {"items": [{"id": e.get("id"), "name": e.get("name"), "detail": e.get("detail")}
                                               for e in protected()]})
@@ -2895,7 +3780,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {"items": list_apps()})
         if url.path == "/api/explore":
             view, pid = query.get("view", ["places"])[0], query.get("id", [""])[0]
-            found = explore_big() if view == "big" else explore_old() if view == "old" else explore_places(pid)
+            try:
+                found = explore_big() if view == "big" else explore_old() if view == "old" else explore_places(pid)
+            except OSError as error:        # a folder too big for one command line, a Mac out of processes
+                return self.reply(500, {"error": sentence(error.strerror or error)})
             if found is None:
                 return self.reply(404, {"error": "That folder is not in the last listing. Go back to the top."})
             return self.reply(200, found)
@@ -2907,6 +3795,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {**settings(), "available": launcher_program() is not None})
         if url.path == "/api/space":
             return self.reply(200, space_history())
+        if url.path == "/api/growth":
+            return self.reply(200, growth())
         if url.path == "/api/update":
             return self.reply(200, update_info(query.get("force", [""])[0] == "1"))
         if url.path == "/api/ping":
@@ -2954,6 +3844,11 @@ class Handler(BaseHTTPRequestHandler):
             wanted = data.get("ids")
             if not isinstance(wanted, list) or not wanted or not all(isinstance(w, str) for w in wanted):
                 return self.reply(400, {"error": "Send the ids of the rows to delete."})
+            if settings_broken():
+                # Guessing "off" would delete for good what was meant for the Trash.
+                return self.reply(500, {"error": "headroom can't read its settings, so it doesn't know whether cleaned "
+                                                 "files should go to the Trash. Set the switch under Maintenance "
+                                                 "again, then try once more."})
             with LOCK:
                 if JOB["running"]:
                     return self.reply(409, {"error": "A delete is already running."})
@@ -2961,9 +3856,13 @@ class Handler(BaseHTTPRequestHandler):
                 if any(w not in known for w in wanted):
                     return self.reply(404, {"error": "Some rows are not in the last scan. Scan again."})
                 rows = [known[w] for w in dict.fromkeys(wanted)]
+                # Read once: the whole job goes one way. The page says what its question promised;
+                # a promise of the Trash is kept even if the switch was turned off since, and a
+                # switch that is on is never overruled.
+                to_trash = settings()["trash"] or data.get("trash") is True
                 JOB.update(running=True, stopping=False, total_kb=sum(r["kb"] for r in rows), done_kb=0,
-                           item_kb=0, index=0, count=len(rows), current=None, results=[])
-            threading.Thread(target=run_job, args=(rows,), daemon=True).start()
+                           item_kb=0, index=0, count=len(rows), current=None, results=[], trash=to_trash)
+            threading.Thread(target=run_job, args=(rows, to_trash), daemon=True).start()
             return self.reply(200, {"started": True})
         if self.path == "/api/stop":
             JOB["stopping"] = True     # finishes the row it is on, then stops
@@ -2982,8 +3881,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, trash_extras([(p["id"], p["keep"]) for p in picks]))
         if self.path == "/api/settings":
             current = settings()
-            for key in ("alert", "weekly"):
-                if isinstance(data.get(key), bool):
+            for key in ("alert", "weekly", "trash"):
+                # Where cleaned files go doesn't change under a delete that is running.
+                if isinstance(data.get(key), bool) and not (key == "trash" and JOB["running"]):
                     current[key] = data[key]
             if isinstance(data.get("alert_gb"), int) and 1 <= data["alert_gb"] <= 1000:
                 current["alert_gb"] = data["alert_gb"]
@@ -2991,7 +3891,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 sync_watch()
             except OSError as error:
-                return self.reply(500, {"error": error.strerror or str(error)})
+                return self.reply(500, {"error": sentence(error.strerror or error)})
             return self.reply(200, {**settings(), "available": launcher_program() is not None})
         if not wanted and self.path in ("/api/protect", "/api/unprotect", "/api/uninstall",
                                         "/api/reveal", "/api/trash", "/api/maintain", "/api/startup"):
@@ -3047,10 +3947,24 @@ class Server6(Server):
     address_family = socket.AF_INET6
 
 
+def reserved_port():
+    """The port the app's launcher keeps for headroom, which it writes to the `port` file beside
+    the settings: 8460 unless something else had it. None when there is no such file, or it holds
+    anything but one of headroom's own ports."""
+    try:
+        with open(os.path.join(state_dir(), "port")) as handle:
+            text = handle.read(16).strip()
+    except OSError:
+        return None
+    return int(text) if text.isascii() and text.isdigit() and 8460 <= int(text) <= 8479 else None
+
+
 def listen():
     """One port on both loopback addresses: macOS sends headroom.localhost to ::1, and some
-    setups to 127.0.0.1. Never the wildcard address, so nothing outside this Mac can connect."""
-    for port in PORTS + [0] * 8:
+    setups to 127.0.0.1. Never the wildcard address, so nothing outside this Mac can connect.
+    The port the launcher keeps for headroom is tried first, then the usual ones."""
+    kept = reserved_port()
+    for port in ([kept] if kept else []) + PORTS + [0] * 8:
         try:
             v4 = Server(("127.0.0.1", port), Handler)
         except OSError:

@@ -30,7 +30,8 @@
     /* One colour per section, in the meter, its legend and beside each section title, in the
        list's order. Checked with the dataviz palette validator on the #0b0b0b header: colour-blind
        and normal-vision separation between neighbours, and 3:1 contrast, all pass (and still pass
-       with any one section empty in 7 of 8 cases). */
+       with any one section empty in 7 of 8 cases). Eight is as many hues as pass, so the three
+       sections of your own files (models, archives, screenshots) share one quiet neutral. */
     --c-trash: #d95926;
     --c-apps: #3987e5;
     --c-temp: #199e70;
@@ -265,6 +266,8 @@
   .ticks i[data-g="builds"], .sw[data-g="builds"] { background: var(--c-builds); }
   .ticks i[data-g="leftovers"], .sw[data-g="leftovers"] { background: var(--c-leftovers); }
   .ticks i[data-g="big"], .sw[data-g="big"] { background: var(--c-big); }
+  .ticks i[data-g="more"], .sw[data-g="more"] { background: var(--band-text-2); }
+  .sec-title .sw[data-g="more"] { background: var(--text-2); }
   @keyframes grow { from { transform: scaleY(0); } }
   .legend { display: flex; flex-wrap: wrap; gap: 6px 26px; padding-block: 12px 26px; color: var(--band-text-2); }
   .legend li { display: inline-flex; align-items: center; gap: 8px; }
@@ -315,6 +318,8 @@
     display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;
     font: 700 clamp(22px, 2.4vw, 32px)/1.08 var(--f-display); letter-spacing: -0.025em; font-variant-numeric: tabular-nums;
   }
+  .sec-side { display: grid; justify-items: end; gap: 6px; }
+  .sec-grew { color: var(--muted); white-space: nowrap; }
   .sec-size .ico { font-size: 16px; color: var(--muted-2); }
   .sec-size .muted { color: var(--muted); }
   .pm { width: 18px; height: 18px; position: relative; margin-top: 8px; }
@@ -394,6 +399,10 @@
   .item-acts { display: flex; flex-wrap: wrap; gap: 4px 16px; }
   .done-note { display: flex; gap: 6px; align-items: center; font-size: 13px; font-weight: 500; color: var(--accent); }
   .done-note.bad { color: var(--warn); }
+  .task p.done-note { color: var(--accent); }
+  .task p.done-note.bad { color: var(--warn); }
+  .task a { color: var(--accent); text-underline-offset: 3px; }
+  #st-update a { display: inline-block; padding: 8px 6px; margin: -8px -6px; }
   .seg { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 999px; }
   .seg button { border: 0; background: none; border-radius: 999px; padding: 8px 14px; cursor: pointer; font: 600 13px/1 var(--f-body); color: var(--text-2); }
   .seg button[aria-pressed="true"] { background: var(--text); color: var(--bg); }
@@ -416,7 +425,7 @@
   .chip { font: 500 10.5px/1.4 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
   .chip.on { border-color: transparent; background: var(--accent-soft); color: var(--accent); }
   .check { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); cursor: pointer; }
-  .switch { position: relative; width: 44px; height: 26px; flex: none; border: 0; border-radius: 999px; background: var(--line); cursor: pointer; transition: background-color .2s; }
+  .switch { position: relative; width: 44px; height: 26px; flex: none; border: 0; border-radius: 999px; background: var(--muted-2); cursor: pointer; transition: background-color .2s; }
   .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--bg); box-shadow: 0 1px 3px #00000040; transition: transform .2s var(--ease); }
   .switch[aria-checked="true"] { background: var(--accent); }
   .switch[aria-checked="true"]::after { transform: translateX(18px); }
@@ -518,8 +527,13 @@
     .sec-toggle { grid-template-columns: minmax(0, 1fr) auto 16px; column-gap: 12px; padding: 20px 0; }
     .sec-num { display: none; }
     .sec-check { padding-top: 24px; }
+    #st-update { order: 1; flex-basis: 100%; }
+    #apps-list .item.head > div:first-child { display: none; }
     .sec-head { gap: 12px; }
     .sec-title, .sec-size { font-size: 21px; }
+    /* The note sits under the size in two short lines, so its column stays narrow. */
+    .sec-grew { width: 0; min-width: max(100%, 4.8rem); white-space: normal; text-align: right; }
+    .sec-grew span { display: block; white-space: nowrap; }
     .pm { margin-top: 4px; width: 16px; height: 16px; }
     .notes { padding-left: 30px; }
     .sec-inner { padding-left: 0; }
@@ -608,7 +622,7 @@
             <p class="hero-lede" id="hero-lede">Make room on this Mac. <em>Nothing is deleted until you confirm.</em></p>
             <div class="safe" id="safe-box" hidden>
               <button class="btn btn-mint" id="safe" type="button">Safe clean</button>
-              <span class="mono">Caches, old logs and temp files, installers over a month old</span>
+              <span class="mono">Caches, old logs and temp files, browser copies automated Chrome left, installers over a month old</span>
             </div>
           </div>
         </div>
@@ -686,6 +700,8 @@
         <p>Things macOS can redo for itself when something looks stuck. Run one only when you need it.</p>
       </div>
       <ul class="plain acc" id="tasks"></ul>
+      <h3 class="mono sub-head">Cleaning</h3>
+      <ul class="plain" id="cleaning"></ul>
       <h3 class="mono sub-head">Reminders</h3>
       <ul class="plain" id="reminders"></ul>
       <h3 class="mono sub-head">Updates</h3>
@@ -697,13 +713,15 @@
     <div class="wrap">
       <div class="list-head">
         <h2 class="display">What <span>went.</span></h2>
-        <p>Everything headroom deleted or moved to the Trash, newest first.</p>
+        <p>Everything headroom deleted, moved to the Trash or packed, newest first.</p>
       </div>
       <section class="chart" aria-labelledby="space-title">
         <h3 class="mono" id="space-title">Free space over time</h3>
         <div class="chart-box" id="space-chart" tabindex="0" aria-label="Free space over time. Use the arrow keys to read each point."></div>
         <details id="space-details"><summary>As a table</summary><table id="space-table"></table></details>
       </section>
+      <h3 class="mono sub-head" id="grew-title">What grew</h3>
+      <ul class="plain" id="grew-list"></ul>
       <div class="tool-bar"><span class="mono status" id="h-status"></span></div>
       <ul class="plain" id="h-list"></ul>
     </div>
@@ -776,12 +794,18 @@ const GROUPS = [
   { id: 'leftovers', title: 'Leftovers of deleted apps', caution: true,
     blurb: 'Settings and data that apps you removed left in your Library. Only apps headroom can’t find on this Mac are listed. If you install one again, it starts fresh.' },
   { id: 'big', title: 'Backups, emulators and big downloads', caution: true,
-    blurb: 'iPhone and iPad backups go to the Trash, since one may be your only copy. Emulators lose their apps and data, models and Docker containers come back only if you fetch them again, and a Docker volume can hold a database.' },
+    blurb: 'iPhone and iPad backups go to the Trash, since one may be your only copy. Emulators lose their apps and data, Docker images come back only if you pull them again, and a Docker volume can hold a database.' },
+  { id: 'models', title: 'Model weight files', caution: true, meter: 'more',
+    blurb: 'Models that Hugging Face, PyTorch, Ollama, LM Studio, GPT4All and Jan downloaded, and model files of 100 MB or more elsewhere in your home folder. One of those may be a model you trained yourself, so they go to the Trash.' },
+  { id: 'archives', title: 'Zip files and other archives', caution: true, meter: 'more',
+    blurb: 'Zip, tar, 7z and rar files of 20 MB or more. The ones with a folder of the same name next to them come first: they look unzipped already. All of them go to the Trash.' },
+  { id: 'shots', title: 'Screenshots and screen recordings', caution: true, meter: 'more',
+    blurb: 'Screenshots and screen recordings macOS saved, a row for each month. They are your own files, so they go to the Trash. Ones from the last 30 days stay unticked when you tick the whole section.' },
 ];
 const KNOWN = new Set(GROUPS.map(g => g.id));
 const CAUTION = new Set(GROUPS.filter(g => g.caution).map(g => g.id));
 const NUM = Object.fromEntries(GROUPS.map((g, i) => [g.id, String(i + 1).padStart(2, '0')]));
-const SHORT = { trash: 'Trash & browsers', apps: 'App caches', temp: 'Logs & temp', installers: 'Installers', dev: 'Dev tools', builds: 'Build folders', leftovers: 'App leftovers', big: 'Backups & big downloads' };
+const SHORT = { trash: 'Trash & browsers', apps: 'App caches', temp: 'Logs & temp', installers: 'Installers', dev: 'Dev tools', builds: 'Build folders', leftovers: 'App leftovers', big: 'Backups & big downloads', more: 'Models, archives & screenshots' };
 const SHOWN = 8;          // rows a section shows before "Show N more"
 const POLL_MS = 400;
 const RUN = document.querySelector('meta[name="headroom-run"]').content;
@@ -817,6 +841,11 @@ const S = {
   queue: [],              // ids picked while a delete runs; sent as the next job
   batch: null,            // finished jobs of this run: {kb, count, results, stopped}
   justFreed: null,
+  justMoved: false,       // what the last run cleared went to the Trash
+  toTrash: false,         // Maintenance's switch: cleaned files go to the Trash, not straight off
+  jobTrash: false,        // the same, for the delete that is running
+  queueTrash: false,      // a question about queued picks promised the Trash: the next job keeps that
+  growth: null,           // {span, sections, top}: what grew since about a week ago
   gone: false,
 };
 const shells = {};
@@ -884,12 +913,26 @@ function since(seconds) {
 const items = n => n === 1 ? '1 item' : n + ' items';
 const sumKb = list => list.reduce((total, row) => total + (row.kb || 0), 0);
 const allRows = () => [...S.rows.values()];
-const bySize = (a, b) => b.kb - a.kb || String(a.name).localeCompare(String(b.name));
+// Ranked rows first (archives that look unzipped, screenshots by month), then by size. A row
+// without a size of its own (git gc) sorts by what it would work on.
+const weight = row => row.kb || row.weighs || 0;
+const bySize = (a, b) => (b.rank || 0) - (a.rank || 0) || weight(b) - weight(a) || String(a.name).localeCompare(String(b.name));
 const rowsIn = group => allRows().filter(row => row.group === group).sort(bySize);
 // Rows that can be picked now: confirmed by this launch's scan, not blocked, not part of a delete.
 const free = row => !row.stale && !row.blocked && !row.status;
 const chosenRows = () => allRows().filter(row => row.checked && free(row)).sort(bySize);
 const safeRows = () => allRows().filter(row => row.safe && !row.recent && free(row));
+// Still measuring, as far as the page as a whole goes. A slow source (Homebrew, Docker, the
+// simulators: each waits on another program) doesn't count: its rows fill in when it answers.
+const scanningNow = () => S.starting || S.sources.some(source => S.pending.has(source.id) && !source.slow);
+const slowPending = group => S.sources.filter(source => source.slow && S.pending.has(source.id)
+  && (!group || (source.groups || []).includes(group))).map(source => source.slow);
+const listed = names => names.length < 2 ? names.join('') : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+// How a row goes: its own command runs (git gc), it moves to the Trash, or it is deleted.
+const moves = row => Boolean(row.trash || (S.deleting ? S.jobTrash : S.toTrash));
+const doing = row => row.action ? 'Running' : moves(row) ? 'Moving' : 'Deleting';
+const BACK = 'The space comes back when you empty the Trash.';
+const GC_KEEPS = 'Commits you can reach stay; git may remove unreachable ones older than its grace period.';
 
 function announce(text) {
   const live = $('live');
@@ -1026,9 +1069,14 @@ function countTo(kb) {
 }
 
 function renderHero() {
-  const found = sumKb(allRows());
-  const scanning = S.starting || S.pending.size > 0;
-  const stale = allRows().some(row => row.stale);
+  const scanning = scanningNow();
+  const late = slowPending();
+  // Once the scan counts as finished, last launch's numbers for a source that is still measuring
+  // are not part of the total: they join it when that source answers.
+  const counted = scanning ? allRows() : allRows().filter(row => !row.stale);
+  const found = sumKb(counted);
+  // Rows of a slow source that hasn't answered yet stay greyed out without holding the page up.
+  const stale = allRows().some(row => row.stale && (scanning || !S.sources.some(source => source.id === row.source && source.slow)));
   if (found !== S.heroKb) {
     S.heroKb = found;
     countTo(found);
@@ -1039,7 +1087,10 @@ function renderHero() {
     lede = 'A delete was already running when this window opened. The list comes back when it is done.';
   } else if (S.deleting) {
     label = 'Can be cleared';
-    lede = 'Deleting what you picked. Free space grows as it goes, and you can keep picking.';
+    const working = allRows().filter(row => row.status && row.status !== 'next');
+    lede = working.length && working.every(row => row.action) ? 'Running git gc on what you picked. You can keep picking.'
+      : S.jobTrash ? `Moving what you picked to the Trash. ${BACK} You can keep picking.`
+      : 'Deleting what you picked. Free space grows as it goes, and you can keep picking.';
   } else if (stale) {
     label = 'Found last time';
     lede = `These numbers are from ${since(S.lastAt)}. headroom is checking them again; rows become pickable as they’re confirmed.`;
@@ -1048,17 +1099,19 @@ function renderHero() {
     lede = 'Measuring caches and leftovers on this Mac. You can start picking now.';
   } else if (found) {
     label = 'Can be cleared';
-    lede = 'Pick what goes below. Nothing is deleted until you confirm.';
+    lede = S.toTrash ? `Pick what goes below. It moves to the Trash when you confirm. ${BACK}`
+      : 'Pick what goes below. Nothing is deleted until you confirm.';
   } else {
     label = 'Nothing to clear';
     lede = 'Caches on this Mac are already small. Scan again another day.';
   }
   $('hero-label').textContent = label;
   $('hero-lede').textContent = lede;
-  $('st-pulse').hidden = !scanning;
+  $('st-pulse').hidden = !scanning && !late.length;
   const done = S.sources.length - S.pending.size;
   $('st-scan').textContent = scanning
     ? (S.sources.length ? `Scanning · ${done} of ${S.sources.length} places` : 'Starting')
+    : late.length ? `${done} of ${S.sources.length} places checked · ${late.length} still measuring`
     : `${S.sources.length} places checked`;
 
   // Safe clean: the zero-risk rows, in two clicks.
@@ -1076,8 +1129,16 @@ function renderHero() {
   $('st-free').textContent = size(freeKb) + ' free';
   if (S.view !== 'clean') return;
   // What can be cleared, section by section, in the order the list shows them.
-  const parts = GROUPS.map(group => ({ id: group.id, title: group.title, kb: sumKb(allRows().filter(row => row.group === group.id)) }))
-    .filter(part => part.kb > 0);
+  // Sections that share a colour are one part.
+  const every = [];
+  for (const group of GROUPS) {
+    const id = group.meter || group.id;
+    const kb = sumKb(counted.filter(row => row.group === group.id));
+    const part = every.find(one => one.id === id);
+    if (part) part.kb += kb;
+    else every.push({ id, title: group.meter ? SHORT[id] : group.title, kb });
+  }
+  const parts = every.filter(part => part.kb > 0);
   const legend = [el('li', {}, el('i', { class: 'sw', 'aria-hidden': 'true' }), 'Used ', el('b', { text: size(used - clear) }))];
   for (const part of parts) {
     legend.push(el('li', {}, el('i', { class: 'sw', 'data-g': part.id, 'aria-hidden': 'true' }),
@@ -1127,6 +1188,7 @@ function buildShells() {
       onchange: event => tickGroup(id, event.target.checked),
     });
     const sizeSlot = el('span', { class: 'sec-size' });
+    const grew = el('span', { class: 'mono sec-grew', hidden: true });
     const sel = el('span', { class: 'mono sec-sel', hidden: true });
     const toggle = el('button', {
       type: 'button', class: 'sec-toggle', key: 'toggle:' + id,
@@ -1135,11 +1197,11 @@ function buildShells() {
     },
       el('span', { class: 'mono sec-num', text: NUM[id] }),
       el('span', { class: 'sec-main' },
-        el('span', { class: 'sec-title' }, el('i', { class: 'sw', 'data-g': id, 'aria-hidden': 'true' }), group.title,
+        el('span', { class: 'sec-title' }, el('i', { class: 'sw', 'data-g': group.meter || id, 'aria-hidden': 'true' }), group.title,
           group.caution && el('span', { class: 'tag', text: 'NOT CACHES' })),
         el('span', { class: 'sec-blurb', text: group.blurb }),
         sel),
-      sizeSlot,
+      el('span', { class: 'sec-side' }, sizeSlot, grew),
       el('span', { class: 'pm', 'aria-hidden': 'true' }));
     const head = el('div', { class: 'sec-head' },
       el('span', { class: 'sec-check' }, all,
@@ -1160,7 +1222,7 @@ function buildShells() {
     const body = el('div', { class: 'sec-body', id: 'body-' + id }, el('div', { class: 'sec-inner' }, list, more, quiet));
     const sec = el('section', { class: 'sec' + (group.caution ? ' caution' : ''), 'aria-label': group.title }, head, notes, body);
     acc.append(sec);
-    shells[id] = { sec, all, size: sizeSlot, sel, toggle, notes, list, more, quiet };
+    shells[id] = { sec, all, size: sizeSlot, grew, sel, toggle, notes, list, more, quiet };
   }
 }
 
@@ -1189,14 +1251,17 @@ function rowNode(row) {
     row.detail && el('span', { class: 'row-detail', text: row.detail }));
   const why = row.blocked || row.note;
   if (why && !row.stale) {
-    const kind = row.blocked ? 'warn' : row.noteKind || 'info';
+    // A row that only waits for the Move to Trash switch is not a warning: it says so quietly.
+    const waits = /while Move to Trash is on/.test(row.blocked);
+    const kind = row.blocked ? (waits ? 'info' : 'warn') : row.noteKind || 'info';
     text.append(el('span', { class: 'row-note ' + kind }, icon(kind === 'info' ? 'info' : 'warn'), el('span', { text: why })));
   }
   const slot = el('span', { class: 'row-size' });
-  if (row.status === 'deleting') slot.append(spinner(), 'Deleting');
-  else if (row.status === 'done') slot.append(icon('check'), 'Freed ' + size(row.freed || 0));
+  if (row.status === 'deleting') slot.append(spinner(), doing(row));
+  else if (row.status === 'done') slot.append(icon('check'), (row.moved ? 'Moved ' : 'Freed ') + size(row.freed || 0));
+  else if (row.status === 'failed') slot.append(row.action ? 'Not done' : moves(row) ? 'Not moved' : STATUS_TEXT.failed);
   else if (STATUS_TEXT[row.status]) slot.append(STATUS_TEXT[row.status]);
-  else slot.append(size(row.kb));
+  else slot.append(row.action || size(row.kb));       // a row that runs a command says which: what it saves isn't known
   const keepable = !row.stale && !row.status && !S.deleting;
   const classes = ['row'];
   if (row.blocked) classes.push('off');
@@ -1228,6 +1293,10 @@ function updateGroup(group) {
   if (mine.length) sizeKids.push(size(sumKb(mine)));
   else sizeKids.push(el('span', { class: 'muted', text: measuring ? '…' : '0 KB' }));
   shell.size.replaceChildren(...sizeKids);
+  // What the section grew by since about a week ago, once this scan has measured it.
+  const up = !measuring && S.growth && S.growth.span ? S.growth.sections[group.id] : 0;
+  shell.grew.hidden = !up;
+  shell.grew.replaceChildren(...(up ? [el('span', { text: '+' + size(up) }), ' ' + S.growth.span] : []));
 
   shell.sel.hidden = !ticked.length;
   shell.sel.textContent = ticked.length
@@ -1247,8 +1316,9 @@ function updateGroup(group) {
   shell.more.hidden = !hidden.length;
   shell.more.textContent = hidden.length ? `Show ${hidden.length} more · ${size(sumKb(hidden))}` : '';
   shell.quiet.hidden = !(measuring || !mine.length);
+  const late = scanningNow() ? [] : slowPending(group.id);
   shell.quiet.replaceChildren(...(measuring
-    ? [spinner(), mine.length ? 'Checking again…' : 'Measuring…']
+    ? [spinner(), late.length ? `Still measuring ${listed(late)}…` : mine.length ? 'Checking again…' : 'Measuring…']
     : ['Nothing worth clearing here.']));
 }
 
@@ -1319,13 +1389,14 @@ function renderDock() {
     const canAdd = chosen.length > 0 && !S.stopping && !S.attached;
     $('add-row').hidden = !canAdd && !queued;
     $('add').hidden = !canAdd;
+    $('add').textContent = chosen.length && chosen.every(moves) ? 'Move these too' : 'Delete these too';
     $('add-text').textContent = [
       canAdd ? `${items(chosen.length)} picked · ${size(total)}` : '',
       queued ? `${items(queued)} queued next` : '',
     ].filter(Boolean).join(' · ');
     return;
   }
-  const scanning = S.starting || S.pending.size > 0;
+  const scanning = scanningNow();
   let main, sub, warn = false;
   if (chosen.length) {
     main = `${items(chosen.length)} picked`;
@@ -1335,7 +1406,7 @@ function renderDock() {
       warn = true;
     } else sub = 'You confirm before anything goes';
   } else if (S.justFreed !== null) {
-    main = `Freed ${size(S.justFreed)}`;
+    main = S.justFreed ? `${S.justMoved ? 'Moved' : 'Freed'} ${size(S.justFreed)}` : S.jobTrash ? 'Nothing was moved' : 'Nothing was freed';
     sub = 'Pick more, or scan again later';
   } else if (scanning) {
     main = 'Measuring…';
@@ -1352,8 +1423,11 @@ function renderDock() {
   $('sum-sub').className = 'mono' + (warn ? ' warn' : '');
   const del = $('del');
   del.disabled = !chosen.length;
-  del.textContent = chosen.length ? 'Delete ' + size(total) : 'Delete';
-  $('rescan').disabled = scanning;
+  const toTrash = chosen.length ? chosen.every(moves) : S.toTrash;
+  if (chosen.length && chosen.every(row => row.action)) del.textContent = 'Run git gc';
+  else if (toTrash) del.textContent = chosen.length ? 'Move to Trash · ' + size(total) : 'Move to Trash';
+  else del.textContent = chosen.length ? 'Delete ' + size(total) : 'Delete';
+  $('rescan').disabled = S.starting || S.pending.size > 0;     // one scan at a time, the slow sources included
 }
 
 function render() {
@@ -1388,6 +1462,7 @@ async function scan(start) {
   if (gen !== S.gen || S.gone) return;
   S.starting = false;
   S.sources = start.sources || [];
+  S.toTrash = Boolean(start.trash);
   setDisk(start.disk);
   // The last scan's numbers show at once, greyed out, until this scan confirms each source.
   S.lastAt = 0;
@@ -1401,11 +1476,46 @@ async function scan(start) {
     }
   }
   render();
-  await Promise.all(S.sources.map(source => scanSource(source, gen)));
+  // Every source is asked for at once. The scan counts as finished when the quick ones are in:
+  // a slow one fills its rows in when it answers, and the totals follow.
+  const asked = S.sources.map(source => [source, scanSource(source, gen)]);
+  await Promise.all(asked.filter(([source]) => !source.slow).map(([, done]) => done));
   if (gen === S.gen && !S.gone) {
-    const found = sumKb(allRows());
+    const found = sumKb(allRows().filter(row => !row.stale));
     announce(found ? `Finished measuring. ${size(found)} can be cleared.` : 'Finished measuring. Nothing to clear right now.');
+    loadGrowth();
   }
+  await Promise.all(asked.map(([, done]) => done));
+  const slow = asked.filter(([source]) => source.slow).map(([source]) => source.slow);
+  if (gen === S.gen && !S.gone && slow.length) {
+    announce(`${listed(slow)} measured too. ${size(sumKb(allRows()))} can be cleared.`);
+    loadGrowth();
+  }
+}
+
+// What grew since about a week ago: a note beside each section's size, and a list under History.
+async function loadGrowth() {
+  try {
+    S.growth = await get('/api/growth');
+  } catch (error) {
+    if (error instanceof TypeError) showGone();
+    return;
+  }
+  renderGrowth();
+  render();
+}
+
+function renderGrowth() {
+  const data = S.growth;
+  if (!data) return;
+  $('grew-title').textContent = data.span ? 'What grew ' + data.span : 'What grew';
+  if (!data.span) return $('grew-list').replaceChildren(quietLine('Not enough history yet. headroom needs a scan from an earlier day to compare with.'));
+  if (!data.top.length) return $('grew-list').replaceChildren(quietLine(`Nothing grew by 100 MB or more ${data.span}.`));
+  $('grew-list').replaceChildren(...data.top.map(entry => el('li', { class: 'item' },
+    el('div', {},
+      el('p', { class: 'item-name', text: entry.name || SECTION_TEXT[entry.group] || entry.group }),
+      el('span', { class: 'row-detail', text: entry.name ? [SECTION_TEXT[entry.group], entry.new ? 'not listed before' : ''].filter(Boolean).join(' · ') : 'The whole section' })),
+    el('div', { class: 'item-side' }, el('span', { class: 'item-size', text: '+' + size(entry.kb) })))));
 }
 
 async function scanSource(source, gen) {
@@ -1475,9 +1585,10 @@ function refreshBlocked() {
 function ask({ title, text, lines = [], yes, style = 'btn-danger' }, then) {
   $('c-title').textContent = title;
   $('c-text').replaceChildren(...[].concat(text));
-  const shown = lines.slice(0, 7).map(([name, kb]) => el('li', {},
+  // A line: [name, kb], or [name, kb, what the right column says instead of the size].
+  const shown = lines.slice(0, 7).map(([name, kb, says]) => el('li', {},
     el('span', { class: 'c-name', text: name }),
-    el('span', { class: 'c-size', text: kb === null ? '' : size(kb) })));
+    el('span', { class: 'c-size', text: says || (kb === null ? '' : size(kb)) })));
   if (lines.length > 7) {
     const rest = lines.slice(7);
     shown.push(el('li', { class: 'c-more' },
@@ -1502,38 +1613,49 @@ function askDelete(safe) {
   if (!chosen.length || S.stopping) return;
   const n = chosen.length;
   const ids = chosen.map(row => row.id);
-  const lines = chosen.map(row => [row.name, row.kb]);
+  // The right column says where each one goes: straight off, to the Trash, or git gc.
+  const lines = chosen.map(row => [row.name, row.kb, row.action || (moves(row) ? 'Trash · ' + size(row.kb) : '')]);
+  const amount = size(sumKb(chosen));
+  // The server is told what this question promised, so a switch turned off afterwards can't
+  // delete for good what was confirmed for the Trash.
+  const promised = S.deleting ? S.jobTrash : S.toTrash;
+  const go = () => startDelete(ids, promised);
   if (safe === true) {
     return ask({
-      title: `Clear ${size(sumKb(chosen))} of caches and old files?`,
-      text: 'Only app caches, old logs and temp files, and installers you downloaded over a month ago. Apps make new caches as they need them. They go straight off this Mac, not to the Trash.',
-      lines, yes: 'Delete ' + size(sumKb(chosen)),
-    }, () => startDelete(ids));
+      title: `Clear ${amount} of caches and old files?`,
+      text: 'Only app caches, old logs and temp files, the browser copies automated Chrome left behind, and installers you downloaded over a month ago. '
+        + (promised ? 'They move to the Trash. ' + BACK : 'They go straight off this Mac, not to the Trash.'),
+      lines, yes: (promised ? 'Move to Trash · ' : 'Delete ') + amount, style: promised ? 'btn-ink' : 'btn-danger',
+    }, go);
   }
-  // One sentence: where they go, and the one thing worth a second look.
+  const runs = chosen.filter(row => row.action).length;
+  const rest = n - runs;
+  const toTrash = chosen.filter(row => !row.action && moves(row)).length;
+  const backups = chosen.filter(row => row.trash && row.group === 'big').length;
   const risky = chosen.filter(row => CAUTION.has(row.group)).length;
-  // Backups go to the Trash; everything else straight off.
-  const toTrash = chosen.filter(row => row.trash).length;
-  const where = toTrash === n ? 'They go to the Trash, so you can still put them back.'
-    : toTrash ? `${toTrash === 1 ? 'The backup goes' : 'The backups go'} to the Trash; the rest go straight off this Mac.`
-    : 'They go straight off this Mac, not to the Trash.';
-  const text = [S.deleting ? 'They go once the current delete finishes. ' + where : where];
-  if (toTrash === n) {
-    return ask({
-      title: `Move ${n === 1 ? 'this backup' : n + ' backups'} to the Trash?`,
-      text: `You can still put ${n === 1 ? 'it' : 'them'} back from the Trash. A backup may be your only copy of that device if it isn’t in iCloud.`,
-      lines, yes: 'Move to Trash · ' + size(sumKb(chosen)), style: 'btn-ink',
-    }, () => startDelete(ids));
-  }
-  if (risky) {
+  const all = rest > 0 && toTrash === rest;        // everything that isn't git gc goes to the Trash
+  const histories = runs === 1 ? '1 git history' : runs + ' git histories';
+  const things = rest === 1 ? '1 item' : rest + ' items';
+  // One sentence: where they go. The list beside each name says it row by row.
+  const where = !rest ? `git gc packs ${runs === 1 ? 'its .git folder' : 'each .git folder'} into fewer files. ${GC_KEEPS}`
+    : all ? `You can put ${rest === 1 ? 'it' : 'them'} back from the Trash. You get the space when you empty it.`
+    : toTrash ? 'Some go to the Trash and the rest straight off this Mac, as the list says.'
+    : `${rest === 1 ? 'It goes' : 'They go'} straight off this Mac, not to the Trash.`;
+  const text = [S.deleting ? `${n === 1 ? 'It goes' : 'They go'} when the run in progress finishes. ${where}` : where];
+  if (backups === n) text.push(' A backup may be your only copy of that device if it isn’t in iCloud.');
+  else if (risky) {
     const which = risky === n ? (n === 1 ? 'It isn’t a cache' : 'None of them are caches')
       : `${risky} of them ${risky === 1 ? 'isn’t a cache' : 'aren’t caches'}`;
     text.push(' ', el('strong', { text: `${which}, so ${risky === 1 ? 'it won’t' : 'they won’t'} come back on ${risky === 1 ? 'its' : 'their'} own.` }));
   }
+  const verb = all ? `Move ${things} to the Trash` : S.deleting ? `Also delete ${rest === 1 ? 'this' : rest + ' more'}` : `Delete ${things}`;
   ask({
-    title: S.deleting ? `Also delete ${n === 1 ? 'this' : n + ' more'}?` : `Delete ${n === 1 ? '1 item' : n + ' items'}?`,
-    text, lines, yes: 'Delete ' + size(sumKb(chosen)),
-  }, () => startDelete(ids));
+    title: !rest ? `Pack ${runs === 1 ? 'this git history' : histories}?`
+      : backups === n ? `Move ${n === 1 ? 'this backup' : n + ' backups'} to the Trash?`
+      : runs ? `${verb} and pack ${histories}?` : verb + '?',
+    text, lines,
+    yes: !rest ? 'Run git gc' : (all ? 'Move to Trash · ' : 'Delete ') + amount, style: !rest || all ? 'btn-ink' : 'btn-danger',
+  }, go);
 }
 
 function safeClean() {
@@ -1543,13 +1665,14 @@ function safeClean() {
   askDelete(true);
 }
 
-async function startDelete(ids) {
+async function startDelete(ids, trash) {
   ids = ids.filter(id => { const row = S.rows.get(id); return row && row.checked && free(row); });
   if (!ids.length) return;
   if (S.deleting) {
     // The app runs one delete at a time, so these wait their turn and go when it ends.
     for (const id of ids) S.rows.get(id).status = 'next';
     S.queue.push(...ids);
+    S.queueTrash = S.queueTrash || Boolean(trash);
     render();
     announce(`${items(ids.length)} queued after the current delete.`);
     return;
@@ -1557,7 +1680,7 @@ async function startDelete(ids) {
   $('result').replaceChildren();
   $('del').disabled = true;
   try {
-    await api('/api/delete', { ids });
+    await api('/api/delete', { ids, trash: Boolean(trash) });
   } catch (error) {
     if (error instanceof AppClosed) return;
     if (error instanceof TypeError) return (await appGone()) ? showGone() : joinRunning();
@@ -1600,6 +1723,7 @@ function watch(attached, first) {
     justFreed: null, follow: !attached, queue: [], batch: { kb: 0, count: 0, results: [], stopped: false },
   });
   if (attached) $('view-clean').hidden = true;
+  if (RM.data) renderReminders();        // the Move to Trash switch can't be flipped under a running delete
   const stop = $('stop');
   stop.disabled = false;
   stop.textContent = 'Stop';
@@ -1635,6 +1759,7 @@ async function poll() {
 
 function applyProgress(progress) {
   setDisk(progress.disk);
+  S.jobTrash = Boolean(progress.trash);
   const results = progress.results || [];
   let changed = false;
   for (; S.applied < results.length; S.applied++) {
@@ -1643,7 +1768,8 @@ function applyProgress(progress) {
     if (!row) continue;
     const errors = result.errors || [];
     if (errors.length && result.freed_kb < 1024) Object.assign(row, { status: 'failed', note: errors[0], noteKind: 'bad' });
-    else Object.assign(row, { status: 'done', freed: result.freed_kb, note: errors[0] || '', noteKind: 'warn' });
+    else Object.assign(row, { status: 'done', freed: result.freed_kb, moved: Boolean(result.trashed),
+      note: errors[0] || result.note || '', noteKind: errors.length ? 'warn' : 'info' });
     changed = true;
   }
   const current = progress.running && progress.current ? progress.current : null;
@@ -1651,11 +1777,13 @@ function applyProgress(progress) {
   const queueKb = sumKb(S.queue.map(id => S.rows.get(id)).filter(Boolean));
   const count = b.count + (progress.count || 0) + S.queue.length;
   const index = b.count + (progress.index || 0);
+  const going = current && S.rows.get(current.id);
+  const verb = going ? doing(going) : S.jobTrash ? 'Moving' : 'Deleting';
   if ((current ? current.id : null) !== S.currentId) {
     S.currentId = current ? current.id : null;
     const row = current && S.rows.get(current.id);
     if (row && row.status !== 'done' && row.status !== 'failed') row.status = 'deleting';
-    if (current) announce(`Deleting ${index + 1} of ${count}: ${current.name}`);
+    if (current) announce(`${verb} ${index + 1} of ${count}: ${current.name}`);
     changed = true;
   }
   if (changed) render(); else renderHero();
@@ -1672,10 +1800,11 @@ function applyProgress(progress) {
   $('prog-pct').textContent = percent + '%';
   $('prog-amt').textContent = total ? ofSize(fraction * total, total) : '';
   const meter = $('meter');
+  meter.setAttribute('aria-label', verb);
   meter.setAttribute('aria-valuenow', String(percent));
   meter.setAttribute('aria-valuetext', `${percent}%${total ? ', ' + ofSize(fraction * total, total) : ''}`);
   if (current) {
-    $('prog-title').textContent = `${progress.stopping ? 'Stopping after' : 'Deleting'} ${index + 1} of ${count}`;
+    $('prog-title').textContent = `${progress.stopping ? 'Stopping after' : verb} ${index + 1} of ${count}`;
     $('prog-name').textContent = current.name;
   } else {
     $('prog-title').textContent = progress.running ? 'Getting ready' : 'Finishing';
@@ -1720,13 +1849,14 @@ function jobEnded(progress) {
 async function startQueued() {
   const ids = S.queue.filter(id => S.rows.has(id));
   try {
-    await api('/api/delete', { ids });
+    await api('/api/delete', { ids, trash: S.queueTrash });
   } catch (error) {
     if (error instanceof AppClosed) return;
     if (error instanceof TypeError && await appGone()) return showGone();
     return wrapUp(`The queued ${items(ids.length)} did not start: ${error.message}`);
   }
   S.queue = [];
+  S.queueTrash = false;
   markQueued(ids);
   S.applied = 0;
   S.currentId = null;
@@ -1736,11 +1866,13 @@ async function startQueued() {
 
 function wrapUp(trouble) {
   const { results, count } = S.batch;
-  let freed = 0;
-  const problems = [];
+  let freed = 0, moved = 0, movedCount = 0;
+  const problems = [], said = [];
   for (const result of results) {
-    freed += result.freed_kb || 0;
+    if (result.trashed) { moved += result.freed_kb || 0; movedCount += result.freed_kb ? 1 : 0; }
+    else freed += result.freed_kb || 0;
     const errors = result.errors || [];
+    if (result.note && !errors.length) said.push([result.name, result.note]);
     const row = S.rows.get(result.id);
     if (result.left_kb >= 1024) {
       const note = errors[0] || 'Some of this is in use and was kept.';
@@ -1756,25 +1888,39 @@ function wrapUp(trouble) {
   }
   const notReached = Math.max(0, count + S.queue.length - results.length);
   const attached = S.attached;
-  Object.assign(S, { deleting: false, attached: false, stopping: false, currentId: null, queue: [], justFreed: freed });
+  // The pill says what the card's headline says: what was freed, or failing that what was moved.
+  Object.assign(S, { deleting: false, attached: false, stopping: false, currentId: null, queue: [], queueTrash: false,
+    justFreed: freed || moved, justMoved: moved > 0 && !freed });
   document.title = 'headroom';
   render();
-  showResult(freed, results.length, problems, notReached, trouble);
+  if (RM.data) renderReminders();
+  showResult(freed, moved, results.length, problems, notReached, trouble, said, movedCount);
+  loadGrowth();
+  refreshBlocked();
   if (attached) {
     $('view-clean').hidden = S.view !== 'clean';
     scan();
   }
 }
 
-function showResult(freed, done, problems, notReached, trouble) {
+function showResult(freed, moved, done, problems, notReached, trouble, said, movedCount) {
   const lines = [];
-  if (S.disk) lines.push(`This Mac now has ${size(S.disk.free_kb)} free.`);
+  if (moved > 0) lines.push(freed > 0 ? `${size(moved)} more went to the Trash. ${BACK}` : `${movedCount === 1 ? 'It is' : 'They are'} in the Trash. ${BACK}`);
+  if (S.disk) lines.push(`This Mac ${freed > 0 ? 'now has' : 'has'} ${size(S.disk.free_kb)} free.`);
   if (notReached) lines.push(`Stopped early: ${notReached === 1 ? '1 item was' : notReached + ' items were'} left as ${notReached === 1 ? 'it was' : 'they were'}.`);
   if (trouble) lines.push(trouble);
   const title = el('h2', { class: 'display r-title', id: 'r-title' });
   if (freed > 0) title.append('Freed ', el('span', { text: size(freed) }));
-  else title.append('Nothing was freed');
-  const block = el('section', { class: 'result' + (freed > 0 ? '' : ' empty'), tabIndex: -1, 'aria-labelledby': 'r-title' },
+  else if (moved > 0) title.append('Moved ', el('span', { text: size(moved) }));
+  else title.append(S.jobTrash ? 'Nothing was moved' : 'Nothing was freed');
+  // "2 not moved" when nothing went at all; "not fully" when some of it did.
+  const undone = (freed > 0 || moved > 0 ? 'not fully ' : 'not ') + (S.jobTrash ? 'moved' : 'deleted');
+  const notes = [];
+  if (problems.length) notes.push(el('li', { class: 'mono', text: `${problems.length} ${undone}` }),
+    ...problems.map(([name, why]) => el('li', {}, el('b', { text: name }), ' · ' + why)));
+  if (said.length) notes.push(el('li', { class: 'mono', text: 'Packed' }),
+    ...said.map(([name, note]) => el('li', {}, el('b', { text: name }), ' · ' + note)));
+  const block = el('section', { class: 'result' + (freed > 0 || moved > 0 ? '' : ' empty'), tabIndex: -1, 'aria-labelledby': 'r-title' },
     el('div', { class: 'wrap' },
       el('div', { class: 'mono r-strip' },
         el('span', { text: `Done · ${items(done - problems.length)} cleared` }),
@@ -1782,11 +1928,10 @@ function showResult(freed, done, problems, notReached, trouble) {
       title,
       el('div', { class: 'r-cols' },
         el('p', { text: lines.join(' ') }),
-        problems.length > 0 && el('ul', { class: 'r-list' },
-          el('li', { class: 'mono', text: problems.length === 1 ? '1 not fully deleted' : `${problems.length} not fully deleted` }),
-          ...problems.map(([name, why]) => el('li', {}, el('b', { text: name }), ' · ' + why))))));
+        notes.length > 0 && el('ul', { class: 'r-list' }, ...notes))));
   $('result').replaceChildren(block);
-  announce([title.textContent + '.', ...lines, problems.length ? `${items(problems.length)} not fully deleted.` : ''].join(' '));
+  announce([title.textContent + '.', ...lines, ...said.map(([name, note]) => `${name}: ${note}`),
+    problems.length ? `${items(problems.length)} ${undone}.` : ''].join(' '));
   if (S.view !== 'clean') return;
   block.focus({ preventScroll: true });
   block.scrollIntoView({ block: 'nearest', behavior: reduceMotion() ? 'auto' : 'smooth' });
@@ -1833,7 +1978,7 @@ function show(view) {
   if (view === 'disk' && !D.data && !D.loading) loadDisk('places', '');
   if (view === 'startup') loadStartup();
   if (view === 'tune') { renderTasks(); loadSettings(); renderUpdate(); }
-  if (view === 'history') { loadHistory(); loadSpace(); }
+  if (view === 'history') { loadHistory(); loadSpace(); loadGrowth(); }
   render();
 }
 
@@ -1880,7 +2025,7 @@ function appNode(app) {
   const result = A.results[app.id];
   const facts = app.version ? 'Version ' + app.version : '';
   // Spotlight has no date for some apps; then the column says so.
-  const used = el('span', { class: 'item-used', 'aria-label': app.used_on ? `Last used ${app.used_on}, ${app.used}` : 'Last used: not recorded' },
+  const used = el('span', { class: 'item-used' }, el('span', { class: 'sr-only', text: 'Last used ' }),
     app.used_on || '–', el('small', { text: app.used_on ? app.used : 'not recorded' }));
   const keeps = app.leftovers.length
     ? `Keeps ${app.leftovers.length === 1 ? '1 thing' : app.leftovers.length + ' things'} in your Library · ${size(left)}`
@@ -1902,7 +2047,7 @@ function appNode(app) {
 
 function askUninstall(app) {
   const left = sumKb(app.leftovers);
-  const text = [`${app.name}${app.leftovers.length ? ` and the ${app.leftovers.length === 1 ? 'one thing' : app.leftovers.length + ' things'} it keeps in your Library` : ''} go to the Trash. Empty the Trash to free ${size(app.kb + left)}.`];
+  const text = [`${app.name}${app.leftovers.length ? ` and the ${app.leftovers.length === 1 ? 'one thing' : app.leftovers.length + ' things'} it keeps in your Library go` : ' goes'} to the Trash. Empty the Trash to free ${size(app.kb + left)}.`];
   if (app.password) text.push(` macOS asks for your password, because ${app.name} was installed for everyone on this Mac.`);
   ask({
     title: `Move ${app.name} to the Trash?`, text,
@@ -2079,7 +2224,7 @@ async function runTask(task) {
 /* ---------- history ---------- */
 
 const RESULT_TEXT = { deleted: 'Deleted', partly: 'Partly done', failed: 'Not done', trashed: 'Moved to the Trash',
-  'turned-off': 'Turned off', 'turned-on': 'Turned on' };
+  compacted: 'Packed with git gc', 'turned-off': 'Turned off', 'turned-on': 'Turned on' };
 const SECTION_TEXT = { ...Object.fromEntries(GROUPS.map(g => [g.id, g.title])), uninstall: 'Uninstalled', disk: 'Disk explorer',
   duplicates: 'Duplicates', startup: 'Startup' };
 
@@ -2107,13 +2252,13 @@ async function loadHistory() {
   $('h-list').replaceChildren(...entries.map(entry => {
     const paths = Array.isArray(entry.paths) ? entry.paths : [];
     const where = entry.command || (paths.length ? paths[0] + (paths.length > 1 ? ` and ${paths.length - 1} more` : '') : '');
-    const ok = entry.result === 'deleted' || entry.result === 'trashed';
+    const ok = ['deleted', 'trashed', 'compacted'].includes(entry.result);
     const main = el('div', {},
       el('p', { class: 'mono h-when', text: [when(entry.at), SECTION_TEXT[entry.section] || ''].filter(Boolean).join(' · ') }),
       el('p', { class: 'item-name', text: String(entry.what || '') }),
       where && el('span', { class: 'row-detail', text: where }),
       el('span', { class: 'done-note' + (ok ? '' : ' bad') }, icon(ok ? 'check' : 'warn'),
-        el('span', { text: (RESULT_TEXT[entry.result] || String(entry.result || '')) + (entry.error ? ': ' + entry.error : '') })));
+        el('span', { text: (RESULT_TEXT[entry.result] || String(entry.result || '')) + (entry.error ? ': ' + entry.error : entry.note ? ': ' + entry.note : '') })));
     return el('li', { class: 'item' }, main, el('div', { class: 'item-side' }, el('span', { class: 'item-size', text: entry.kb ? size(entry.kb) : '' })));
   }));
 }
@@ -2329,6 +2474,7 @@ async function loadSettings() {
 }
 
 async function saveSettings(change) {
+  const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.key : null;
   RM.busy = true;
   renderReminders();
   try {
@@ -2338,13 +2484,29 @@ async function saveSettings(change) {
   }
   RM.busy = false;
   renderReminders();
+  // The list was drawn again: the switch that was pressed keeps the keyboard.
+  const again = focused && document.querySelector(`[data-key="${CSS.escape(focused)}"]`);
+  if (again) again.focus({ preventScroll: true });
+  // The switch changes where cleaned files go, and which rows can be cleared at all.
+  if (RM.data && S.toTrash !== Boolean(RM.data.trash)) {
+    S.toTrash = Boolean(RM.data.trash);
+    render();
+    refreshBlocked();
+  }
 }
 
 function renderReminders() {
   const data = RM.data;
   if (!data) return $('reminders').replaceChildren(quietLine(spinner(), 'Reading'));
+  const toTrash = 'Move cleaned files to the Trash instead of deleting them';
+  $('cleaning').replaceChildren(el('li', { class: 'task' },
+    el('div', {}, el('h3', {}, toTrash),
+      el('p', { text: `Nothing is deleted for good while this is on. ${BACK} Rows that only a command can clear (Homebrew, Docker, Ollama, simulators, git gc) and the Trash itself wait, greyed out, until you switch it off.` })),
+    // Not under a delete that is running: where its rows go was settled when it started.
+    el('button', { type: 'button', class: 'switch', role: 'switch', key: 'switch:trash', 'aria-checked': String(Boolean(data.trash)),
+      'aria-label': toTrash, disabled: RM.busy || S.deleting, onclick: () => saveSettings({ trash: !data.trash }) })));
   const off = !data.available || RM.busy;
-  const toggle = (key, label) => el('button', { type: 'button', class: 'switch', role: 'switch', 'aria-checked': String(data[key]),
+  const toggle = (key, label) => el('button', { type: 'button', class: 'switch', role: 'switch', key: 'switch:' + key, 'aria-checked': String(data[key]),
     'aria-label': label, disabled: off, onclick: () => saveSettings({ [key]: !data[key] }) });
   const choose = el('select', { class: 'inline-select', disabled: off || !data.alert, 'aria-label': 'Warn below',
     onchange: event => saveSettings({ alert_gb: Number(event.target.value) }) },
@@ -2624,6 +2786,7 @@ async function boot() {
   if (progress.running) {
     S.starting = false;
     S.sources = start.sources || [];
+    S.toTrash = Boolean(start.trash);
     setDisk(start.disk);
     watch(true, progress);
   } else {

@@ -57,12 +57,18 @@ def build(app):
         shutil.copy(os.path.join(HERE, name), os.path.join(contents, "Resources"))
     info = dict(INFO)
     # The Dock launcher gives headroom a Dock icon and a Quit; it is compiled for this Mac's chip.
+    # So is headroom-size, which measures folders many times faster than du. Either one is copied
+    # if it got built: without the launcher a shell script starts headroom, without the measurer
+    # du does the measuring, and without a Swift compiler both.
     shell = os.path.join(contents, "MacOS", "headroom-app")
     with tempfile.TemporaryDirectory() as scratch:
         built = os.path.join(scratch, "headroom-app")
-        if spawn("/bin/sh", os.path.join(HERE, "launcher", "build.sh"), platform.machine(), built):
+        spawn("/bin/sh", os.path.join(HERE, "launcher", "build.sh"), platform.machine(), built)
+        if os.path.exists(built):
             shutil.copy(built, shell)
             info["CFBundleExecutable"] = "headroom-app"
+        if os.path.exists(os.path.join(scratch, "headroom-size")):
+            shutil.copy(os.path.join(scratch, "headroom-size"), os.path.join(contents, "MacOS"))
     if not os.path.exists(shell):
         launcher = os.path.join(contents, "MacOS", "headroom")
         with open(launcher, "w") as script:

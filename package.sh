@@ -43,8 +43,10 @@ build() {
     --specpath build cleaner.py
   app="build/dist-$arch/headroom.app"
   # The Dock launcher becomes the app's main program and starts the frozen server beside it,
-  # which gives headroom a Dock icon and a Quit. Same version as install.py.
+  # which gives headroom a Dock icon and a Quit. Same version as install.py. The same script
+  # builds headroom-size beside it, for this chip: the folder measurer the scans use.
   launcher/build.sh "$arch" "$app/Contents/MacOS/headroom-app"
+  [ -x "$app/Contents/MacOS/headroom-size" ] || { echo "headroom-size was not built for $arch" >&2; exit 1; }
   /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable headroom-app" \
     -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
   codesign --force --deep --sign "$sign_id" "$app"     # checked at the top; a failure here stops the build
