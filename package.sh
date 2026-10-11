@@ -29,7 +29,10 @@ build() {
   launcher/build.sh "$arch" "$app/Contents/MacOS/headroom-app"
   /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable headroom-app" \
     -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
-  codesign --force --deep --sign - "$app"
+  # Same certificate every release, so friends' Macs keep headroom's permissions across updates.
+  # SIGN_ID picks another one (a Developer ID later); no certificate → ad-hoc.
+  codesign --force --deep --sign "${SIGN_ID:-IPS Local Apps}" "$app" 2>/dev/null \
+    || codesign --force --deep --sign - "$app"
   rm -f "dist/$zip"
   ditto -c -k --keepParent "$app" "dist/$zip"
   echo "Made: dist/$zip ($(du -h "dist/$zip" | cut -f1))"

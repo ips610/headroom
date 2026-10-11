@@ -68,9 +68,12 @@ def build(app):
         info["LSUIElement"] = True      # a shell script cannot hold a Dock icon, so show none
     with open(os.path.join(contents, "Info.plist"), "wb") as plist:
         plistlib.dump(info, plist)
-    # An ad-hoc signature gives macOS one stable name to remember folder permissions against.
-    # The app runs without it, so a failure here is not worth stopping for.
-    return spawn("/usr/bin/codesign", "--force", "--sign", "-", app)
+    # macOS remembers permissions (Full Disk Access, notifications) against the signature. Signing
+    # with the same certificate every time keeps them across rebuilds; an ad-hoc signature changes
+    # with every build, so macOS asks again. No certificate on this Mac → ad-hoc, which still runs.
+    sign_id = os.environ.get("SIGN_ID", "IPS Local Apps")
+    return (spawn("/usr/bin/codesign", "--force", "--sign", sign_id, app)
+            or spawn("/usr/bin/codesign", "--force", "--sign", "-", app))
 
 
 def main():

@@ -146,7 +146,10 @@ cd headroom
 python3 install.py
 ```
 
-That puts `headroom.app` in `/Applications`. `./run.sh` starts it straight from the folder, and
+That puts `headroom.app` in `/Applications`. It's signed with my own certificate ("IPS Local Apps")
+when that's in the keychain, so macOS keeps Full Disk Access and notifications across rebuilds.
+Without it, the app gets a throwaway signature and macOS asks again after every rebuild. Set
+`SIGN_ID` to use a different certificate. `./run.sh` starts it straight from the folder, and
 `python3 test_cleaner.py` runs the tests. They use a fake home folder and stand in for Finder,
 so nothing real gets deleted or moved.
 
