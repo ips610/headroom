@@ -28,7 +28,7 @@ INFO = {
     "CFBundleIdentifier": "local.headroom",
     "CFBundleExecutable": "headroom",
     "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "1.1",
+    "CFBundleShortVersionString": "1.2",
     "CFBundleIconFile": "icon",
     "LSUIElement": True,    # the browser tab is the window, so no Dock icon of its own
 }

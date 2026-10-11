@@ -1,38 +1,69 @@
 # headroom
 
-A small Mac cache cleaner that lists caches and leftover files that are safe to delete, and deletes
-the ones you tick. It opens as a page in your browser, served only to this Mac.
+My Mac ran out of space, so I made this to see what was eating it and clear the junk safely.
+headroom finds caches and leftover files, shows how much space each one takes, and deletes
+only what you tick.
 
-## Use it
+It runs as a small page in your browser. Nothing leaves your Mac, and nothing gets deleted
+until you confirm.
 
-Open **headroom** from Applications, Spotlight or Launchpad. Or, from this folder:
+## Download
 
-```sh
-./run.sh
-```
+Get the zip for your Mac from the [Releases page](https://github.com/ips610/headroom/releases/latest):
 
-Tick rows, press **Delete**, confirm. A progress bar follows the delete, and **Stop** halts it
-after the item it is on. Deleted items do not go to the Trash. The app stops by itself when
-you close the tab.
+- `headroom-apple-silicon.zip` for M1 and newer
+- `headroom-intel.zip` for Intel Macs
 
-After changing `cleaner.py` or `ui.html`, run `python3 install.py` to rebuild the app. It
-needs Python 3 (Homebrew's is used if present) and nothing else.
+Not sure which one you have? Apple menu → About This Mac. If it says "Chip", get Apple
+Silicon. If it says "Processor", get Intel.
 
-## Share it with someone
+Unzip it, drag headroom into Applications and open it. The first time, macOS won't open it
+because the app isn't notarised by Apple. Go to System Settings → Privacy & Security, scroll
+down and click Open Anyway. You only have to do that once.
 
-**No Python needed on their Mac.** `./package.sh` builds `dist/headroom.zip` (about 13 MB):
-a `headroom.app` with its own Python inside, for both Apple Silicon and Intel Macs. It needs
-the python.org Python 3.11 on the Mac that builds it, and downloads PyInstaller into
-`.venv-build` the first time. Send the zip (AirDrop, Drive, a message). On their Mac:
+You don't need Python or anything else installed.
 
-1. Unzip it and drag `headroom.app` into Applications.
-2. Open it. macOS blocks it the first time because it is not notarised by Apple: open
-   System Settings → Privacy & Security, scroll down, and press **Open Anyway** next to
-   headroom. (Or, in Terminal: `xattr -dr com.apple.quarantine /Applications/headroom.app`.)
-3. It opens a page in their browser. The first scan may ask for access to Desktop,
-   Documents and Downloads, which it needs to find project build folders.
+## Using it
 
-**With GitHub access and Python 3:**
+Open headroom and it scans your Mac. Tick a whole section or open it to pick single items,
+then hit Delete. A progress bar shows how it's going and you can stop it any time. Deleted
+files don't go to the Trash, so check what you tick.
+
+The first scan may ask for access to Desktop, Documents and Downloads. That's how it finds
+`node_modules` and build folders in your projects.
+
+If an app is open, its cache is greyed out until you quit it, because the app would just
+write it back.
+
+## What it cleans
+
+| Section | What's in it |
+| --- | --- |
+| App caches | everything in `~/Library/Caches`, plus the cache folders of apps like Slack, VS Code and Notion |
+| Logs and temporary files | `~/Library/Logs` and temp files nobody has touched for a day |
+| Developer tool caches | npm, Bun, Gradle, pub, Cargo, uv, Conda, Flutter, Xcode DerivedData, old simulators, Docker build cache, `~/.cache` |
+| Project build folders | `node_modules`, `.next`, Rust `target`, Flutter `build` and `.dart_tool` |
+| Emulators, models and big downloads | Android emulators and system images, iOS simulators, Ollama and LM Studio models, unused Docker images, Xcode archives |
+
+The last one isn't really cache. Those things won't come back on their own, so headroom keeps
+them in their own section and warns you before deleting them.
+
+## What it won't touch
+
+Your actual app data (settings, chats, local storage), Docker volumes, virtualenvs, Apple's own
+caches, and any `build` or `target` folder that doesn't sit next to a `pubspec.yaml` or
+`Cargo.toml`. macOS locks Safari's and Chrome's caches, so clear those from the browser.
+
+## Is it safe?
+
+I was careful here because it deletes things. The page never sends file paths to the app, only
+the ids of rows it was shown, and the app only deletes what its own scan found. On top of that
+it refuses anything outside your home folder or reached through a symlink. It only listens on
+`127.0.0.1` and needs a random token made at launch, so no website can talk to it.
+
+## Building it yourself
+
+You need Python 3.
 
 ```sh
 git clone https://github.com/ips610/headroom.git
@@ -40,51 +71,10 @@ cd headroom
 python3 install.py
 ```
 
-That builds `headroom.app` into `/Applications` (or `~/Applications` on an account that
-cannot write there). Built on their own Mac, it opens without the Gatekeeper step.
+That puts `headroom.app` in `/Applications`. `./run.sh` starts it straight from the folder, and
+`python3 test_cleaner.py` runs the tests. They use a fake home folder, so nothing real gets
+deleted.
 
-A Mac with a full disk often cannot `fork` new processes. The app and the installer are
-written to start programs without forking, so they still open in that state.
-
-## What it lists
-
-| Section | What is in it |
-| --- | --- |
-| App caches | `~/Library/Caches`, and the cache folders of Chromium-based apps (Slack, VS Code, Notion ...) in `~/Library/Application Support` |
-| Logs and temporary files | `~/Library/Logs`, and temp files untouched for over a day |
-| Developer tool caches | npm, Bun, Gradle, pub, Cargo, uv, Conda downloads, Flutter SDK downloads, older Claude Code versions, Xcode DerivedData and device support, simulators that no longer open, Docker build cache, `~/.cache` |
-| Project build folders | `node_modules`, `.next`, Rust `target`, Flutter `build` and `.dart_tool` inside your projects |
-| Emulators, models and other big downloads | Android emulators, system images and NDKs, iOS simulators that still work, Ollama and LM Studio models, Docker images no container uses, Xcode archives. Not caches: each one is gone until you download or make it again |
-
-A row is greyed out while its app is running, because the app would write the cache back.
-Only the app itself counts: helpers inside its bundle that keep running after you quit it
-(WhatsApp's notification extension, draw.io's Quick Look preview) do not. Coming back to the
-tab re-checks, so a row frees up as soon as you quit its app.
-
-## What it never touches
-
-- App data that is not cache: settings, chats, local storage, `~/.claude`.
-- Docker volumes and containers, the Claude Code version you run, and any that a session is
-  still running.
-- Virtualenvs, and any `build` or `target` folder without the project file that proves what
-  it is (`pubspec.yaml`, `Cargo.toml`).
-- Apple's own caches (`com.apple.*`), and Chrome's and Safari's, which macOS keeps private.
-  Clear those from the browser itself.
-
-## How deleting is kept safe
-
-- The page never sends a path. It sends the ids of rows from the last scan, and the server
-  deletes only what that scan listed.
-- A second check refuses anything outside the home folder or the per-user temp folder, or
-  reached through a symlink.
-- The server listens on `127.0.0.1` only, and every request needs a token made at launch,
-  so no other website or program can ask it to delete anything.
-
-## Tests
-
-```sh
-python3 test_cleaner.py
-```
-
-Builds a throwaway home folder, runs the scan and the delete against it, and checks the
-guards above. Nothing real is touched.
+`./package.sh` makes the two zips for the Releases page. It needs the python.org Python 3.11
+and downloads PyInstaller the first time. I build Apple Silicon and Intel separately on purpose:
+a universal app made macOS warn that it "will not open in macOS 28".
