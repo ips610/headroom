@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
+<meta name="headroom-run" content="__RUN__">
 <title>headroom</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
@@ -18,13 +19,17 @@
     --green: #0f4a34;
     --mint: #7be0a8;
     --mint-text: #9fd1b6;
-    /* One colour per section, in the meter, its legend and beside each section title.
-       Checked with the dataviz palette validator on the #0b0b0b header: colour-blind and
-       normal-vision separation between neighbours, and 3:1 contrast, all pass. */
+    /* One colour per section, in the meter, its legend and beside each section title, in the
+       list's order. Checked with the dataviz palette validator on the #0b0b0b header: colour-blind
+       and normal-vision separation between neighbours, and 3:1 contrast, all pass (and still pass
+       with any one section empty in 7 of 8 cases). */
+    --c-trash: #d95926;
     --c-apps: #3987e5;
     --c-temp: #199e70;
+    --c-installers: #e66767;
     --c-dev: #9085e9;
     --c-builds: #d55181;
+    --c-leftovers: #008300;
     --c-big: #c98500;
     --bg: #ffffff;
     --panel: #f6f7f5;
@@ -35,6 +40,7 @@
     --muted-2: #8a8f89;
     --accent: #0f4a34;
     --accent-soft: #e8f1ec;
+    --bar: #3c8f68;
     --warn: #a14b0a;
     --warn-line: #e3a565;
     --danger: #c93a2b;
@@ -56,6 +62,7 @@
       --muted-2: #7d817c;
       --accent: #7be0a8;
       --accent-soft: rgba(123, 224, 168, .1);
+      --bar: #5fbf8e;
       --warn: #f0a75a;
       --warn-line: #8a5a2b;
       --danger: #e0533f;
@@ -102,18 +109,34 @@
   .btn-ghost { background: transparent; border-color: currentColor; }
   .btn-ghost.soft { border-color: #ffffff3d; }
   .btn-danger { background: var(--danger); color: #fff; }
+  .btn-ink { background: var(--text); color: var(--bg); }
   .btn.sm { min-height: 34px; padding: 0 14px; font-size: 12px; }
+  /* Small text actions inside a row */
+  .link {
+    border: 0; background: none; padding: 6px 0; cursor: pointer; white-space: nowrap;
+    font: 500 10.5px/1.4 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+  }
+  .link:hover:not(:disabled) { color: var(--text); text-decoration: underline; }
+  .link:disabled { opacity: .4; cursor: default; }
 
   /* ---------- ink hero ---------- */
   .top { background: var(--ink); color: var(--on-dark); --focus: var(--mint); border-bottom: 1px solid var(--dark-line); }
-  .nav { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 18px; }
+  .nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; padding-block: 14px; }
   .logo { display: inline-flex; align-items: center; gap: 9px; font: 800 20px/1 var(--f-display); letter-spacing: -0.04em; }
   .mark { width: 22px; height: 22px; }
-  .nav-tag { color: var(--on-dark-2); }
+  .tabs { display: flex; gap: 2px; }
+  .tab {
+    border: 0; background: none; padding: 9px 12px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+    font: 500 11px/1.2 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--on-dark-2);
+    transition: background-color .2s, color .2s;
+  }
+  .tab:hover { color: var(--on-dark); }
+  .tab[aria-current="page"] { background: #ffffff17; color: var(--mint); }
   .strip {
     display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 24px;
     padding-block: 10px; border-block: 1px solid var(--dark-line); color: var(--mint-text);
   }
+  .top.slim .strip { border-bottom: 0; }
   .strip > span { display: inline-flex; align-items: center; gap: 8px; }
   .pulse { width: 6px; height: 6px; border-radius: 50%; background: var(--mint); animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .25; transform: scale(.7); } }
@@ -130,6 +153,8 @@
   .hero-label { color: var(--mint-text); display: flex; gap: 8px; align-items: center; }
   .hero-lede { font-size: clamp(15px, 1.3vw, 18px); line-height: 1.4; font-weight: 500; color: var(--on-dark); }
   .hero-lede em { font-style: normal; color: var(--mint-text); }
+  .safe { display: grid; justify-items: start; gap: 8px; margin-top: 8px; }
+  .safe span { color: var(--on-dark-2); }
   .ticks { display: flex; align-items: flex-end; gap: 3px; height: 40px; margin-top: clamp(28px, 4vw, 48px); }
   .ticks i {
     flex: 1 1 0; min-width: 0; height: 100%; border-radius: 1px; background: #3d413d;
@@ -137,10 +162,13 @@
     transition: background-color .5s, height .5s var(--ease);
   }
   .ticks i.f { background: #232523; height: 30%; }
+  .ticks i[data-g="trash"], .sw[data-g="trash"] { background: var(--c-trash); }
   .ticks i[data-g="apps"], .sw[data-g="apps"] { background: var(--c-apps); }
   .ticks i[data-g="temp"], .sw[data-g="temp"] { background: var(--c-temp); }
+  .ticks i[data-g="installers"], .sw[data-g="installers"] { background: var(--c-installers); }
   .ticks i[data-g="dev"], .sw[data-g="dev"] { background: var(--c-dev); }
   .ticks i[data-g="builds"], .sw[data-g="builds"] { background: var(--c-builds); }
+  .ticks i[data-g="leftovers"], .sw[data-g="leftovers"] { background: var(--c-leftovers); }
   .ticks i[data-g="big"], .sw[data-g="big"] { background: var(--c-big); }
   @keyframes grow { from { transform: scaleY(0); } }
   .legend { display: flex; flex-wrap: wrap; gap: 6px 26px; padding-block: 12px 26px; color: var(--on-dark-2); }
@@ -208,13 +236,15 @@
   .sec-inner { overflow: hidden; min-height: 0; padding-left: calc(18px + 16px); }
 
   .rows { border-top: 1px solid var(--line); }
+  .row { position: relative; }
   .row + .row { border-top: 1px solid var(--line); }
   .row label {
-    display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; column-gap: 16px; align-items: start;
+    display: grid; grid-template-columns: 18px minmax(0, 1fr) minmax(5.6rem, auto); column-gap: 16px; align-items: start;
     padding: 14px 12px 14px 0; cursor: pointer; transition: background-color .2s;
   }
+  .row.keepable label { min-height: 70px; }
   .row input { margin-top: 2px; }
-  @media (hover: hover) { .row:not(.off):not(.is-deleting) label:hover { background: var(--panel); } }
+  @media (hover: hover) { .row:not(.off):not(.is-deleting):not(.stale) label:hover { background: var(--panel); } }
   .row-name { display: block; font-weight: 500; overflow-wrap: anywhere; }
   .row-detail { display: block; margin-top: 3px; font: 11.5px/1.45 var(--f-mono); color: var(--muted); overflow-wrap: anywhere; }
   .row-note { display: flex; gap: 6px; align-items: flex-start; margin-top: 6px; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
@@ -222,8 +252,14 @@
   .row-note.warn { color: var(--warn); }
   .row-note.bad { color: var(--danger); }
   .row-note.info { color: var(--muted); }
-  .row-size { display: inline-flex; align-items: center; gap: 6px; padding-top: 2px; font: 12.5px/1.4 var(--f-mono); white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .row.off .row-name, .row.off .row-size { color: var(--muted-2); }
+  .row-size { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; padding-top: 2px; font: 12.5px/1.4 var(--f-mono); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* "Never offer" sits under the size, outside the label so it never ticks the box. */
+  .row-keep { position: absolute; right: 12px; top: 38px; }
+  @media (hover: hover) {
+    .row-keep { opacity: 0; transition: opacity .2s; }
+    .row:hover .row-keep, .row:focus-within .row-keep { opacity: 1; }
+  }
+  .row.off .row-name, .row.off .row-size, .row.stale .row-name, .row.stale .row-size { color: var(--muted-2); }
   .row.is-queued .row-size, .row.is-next .row-size { color: var(--muted-2); letter-spacing: .06em; text-transform: uppercase; font-size: 11px; }
   .row.is-deleting label { background: var(--accent-soft); }
   .row.is-deleting .row-size { color: var(--accent); text-transform: uppercase; letter-spacing: .06em; font-size: 11px; }
@@ -233,6 +269,45 @@
   .more:hover { text-decoration: underline; }
   .quiet { display: flex; gap: 8px; align-items: center; padding: 14px 0 20px 34px; color: var(--muted); font-size: 14px; }
   .rows:not([hidden]) ~ .quiet { border-top: 1px solid var(--line); }
+
+  /* Rows kept off the list */
+  .kept { margin-top: 48px; display: grid; gap: 10px; max-width: 760px; }
+  .kept h3 { color: var(--muted); }
+  .kept > p { color: var(--text-2); font-size: 14px; }
+  .kept ul { border-top: 1px solid var(--line); }
+  .kept li { display: flex; align-items: center; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .kept li > span { flex: 1; min-width: 0; }
+
+  /* ---------- the other views: plain lists ---------- */
+  .tool-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: clamp(28px, 4vw, 48px); padding-bottom: 12px; border-bottom: 1px solid var(--text); color: var(--muted); }
+  .tool-bar .status { display: inline-flex; align-items: center; gap: 8px; }
+  .plain > li { border-bottom: 1px solid var(--line); }
+  .plain .quiet { padding-left: 0; }
+  .item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 6px 20px; padding: 16px 0; }
+  .item-name { font-weight: 600; overflow-wrap: anywhere; }
+  .item-side { display: flex; align-items: center; gap: 14px; justify-content: flex-end; }
+  .item-size { font: 12.5px/1.4 var(--f-mono); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .item-acts { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+  .done-note { display: flex; gap: 6px; align-items: center; font-size: 13px; font-weight: 500; color: var(--accent); }
+  .done-note.bad { color: var(--warn); }
+  .seg { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 999px; }
+  .seg button { border: 0; background: none; border-radius: 999px; padding: 8px 14px; cursor: pointer; font: 600 13px/1 var(--f-body); color: var(--text-2); }
+  .seg button[aria-pressed="true"] { background: var(--text); color: var(--bg); }
+  .trail { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; margin-top: 18px; }
+  .trail button { border: 0; background: none; padding: 4px 0; cursor: pointer; font: 500 11px/1.4 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+  .trail button:hover { text-decoration: underline; }
+  .trail span { color: var(--muted-2); font: 11px/1.4 var(--f-mono); }
+  .trail b { font: 600 11px/1.4 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; }
+  .open-dir { display: inline-flex; align-items: baseline; gap: 6px; border: 0; background: none; padding: 0; text-align: left; cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }
+  .open-dir:hover { text-decoration: underline; }
+  .open-dir::after { content: "›"; color: var(--muted-2); font-weight: 400; }
+  .bar { height: 4px; margin-top: 10px; background: var(--line); border-radius: 2px; overflow: hidden; max-width: 520px; }
+  .bar i { display: block; height: 100%; background: var(--bar); border-radius: 2px; }
+  .task { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 24px; align-items: center; padding: 22px 0; }
+  .task h3 { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font: 700 clamp(19px, 2vw, 24px)/1.15 var(--f-display); letter-spacing: -0.02em; }
+  .task p { color: var(--text-2); font-size: 14.5px; max-width: 64ch; margin-top: 6px; }
+  .tag.plain { border-color: var(--line); color: var(--muted); }
+  .h-when { color: var(--muted); }
 
   /* ---------- floating pill ---------- */
   .dock { position: fixed; z-index: 10; left: 0; right: 0; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); display: flex; justify-content: center; padding-inline: var(--gutter); pointer-events: none; }
@@ -296,7 +371,8 @@
   .gone-in p:last-child { color: var(--on-dark-2); font-size: 17px; max-width: 46ch; }
 
   @media (max-width: 760px) {
-    .nav-tag { display: none; }
+    .tabs { width: 100%; justify-content: space-between; }
+    .tab { padding: 8px 6px; font-size: 10.5px; letter-spacing: .04em; }
     .hero { grid-template-columns: minmax(0, 1fr); }
     .hero-num { font-size: 27vw; }
     .list-head { grid-template-columns: minmax(0, 1fr); }
@@ -310,7 +386,12 @@
     .sec-inner { padding-left: 0; }
     .more { margin-left: 34px; }
     .quiet { padding-left: 34px; }
+    .row label { column-gap: 12px; }
     .r-cols { grid-template-columns: minmax(0, 1fr); }
+    .item { grid-template-columns: minmax(0, 1fr); }
+    .item-side { justify-content: space-between; flex-direction: row-reverse; }
+    .task { grid-template-columns: minmax(0, 1fr); }
+    .task .btn { justify-self: start; }
     .dock { bottom: calc(10px + env(safe-area-inset-bottom, 0px)); padding-inline: 10px; }
     .dock-in { width: 100%; border-radius: 22px; padding: 14px; }
     .idle { flex-wrap: wrap; gap: 12px; }
@@ -356,38 +437,106 @@
 </svg>
 
 <div id="app">
-  <header class="top">
+  <header class="top" id="top">
     <div class="wrap">
       <nav class="nav" aria-label="headroom">
         <span class="logo"><svg class="mark" aria-hidden="true"><use href="#i-mark"/></svg>headroom</span>
-        <span class="mono nav-tag">Caches and leftovers · cleared on your say-so</span>
+        <div class="tabs" id="tabs">
+          <button class="tab" type="button" data-view="clean" aria-current="page">Clean</button>
+          <button class="tab" type="button" data-view="apps">Uninstall</button>
+          <button class="tab" type="button" data-view="disk">Disk</button>
+          <button class="tab" type="button" data-view="tune">Maintenance</button>
+          <button class="tab" type="button" data-view="history">History</button>
+        </div>
       </nav>
       <div class="strip mono">
         <span id="st-disk">This Mac</span>
         <span id="st-free">Free space –</span>
         <span><i class="pulse" id="st-pulse"></i><span id="st-scan">Starting</span></span>
       </div>
-      <div class="hero">
-        <h1 class="hero-num display"><span class="ln"><span><span id="hero-num">0</span><small id="hero-unit">KB</small></span></span><span class="sr-only" id="hero-sr"> can be cleared</span></h1>
-        <div class="hero-side">
-          <p class="mono hero-label" id="hero-label">Measuring</p>
-          <p class="hero-lede" id="hero-lede">Make room on this Mac. <em>Nothing is deleted until you confirm.</em></p>
+      <div id="clean-hero">
+        <div class="hero">
+          <h1 class="hero-num display"><span class="ln"><span><span id="hero-num">0</span><small id="hero-unit">KB</small></span></span><span class="sr-only" id="hero-sr"> can be cleared</span></h1>
+          <div class="hero-side">
+            <p class="mono hero-label" id="hero-label">Measuring</p>
+            <p class="hero-lede" id="hero-lede">Make room on this Mac. <em>Nothing is deleted until you confirm.</em></p>
+            <div class="safe" id="safe-box" hidden>
+              <button class="btn btn-mint" id="safe" type="button">Safe clean</button>
+              <span class="mono">Caches, old logs and temp files, installers over a month old</span>
+            </div>
+          </div>
         </div>
+        <div class="ticks" id="ticks" role="img" aria-label="Storage on this Mac"></div>
+        <ul class="legend mono" id="legend"></ul>
       </div>
-      <div class="ticks" id="ticks" role="img" aria-label="Storage on this Mac"></div>
-      <ul class="legend mono" id="legend"></ul>
     </div>
   </header>
 
   <div id="result"></div>
 
-  <main class="list" id="groups">
+  <main class="list" id="view-clean">
     <div class="wrap">
       <div class="list-head">
         <h2 class="display">Choose what <span>goes.</span></h2>
         <p>Tick a whole section, or open it to pick single items. You can keep picking while a delete runs; they join the queue.</p>
       </div>
       <div class="acc" id="acc"></div>
+      <section class="kept" id="kept" hidden aria-labelledby="kept-title">
+        <h3 class="mono" id="kept-title">Never offered</h3>
+        <p>Rows you asked headroom to leave alone. Offer one again and it comes back on the next scan.</p>
+        <ul id="kept-list"></ul>
+      </section>
+    </div>
+  </main>
+
+  <main class="list" id="view-apps" hidden>
+    <div class="wrap">
+      <div class="list-head">
+        <h2 class="display">Uninstall <span>apps.</span></h2>
+        <p>Moves an app and what it keeps in your Library to the Trash, so you can still change your mind. Apple's own apps aren't listed.</p>
+      </div>
+      <div class="tool-bar"><span class="mono status" id="apps-status"></span><button class="btn btn-ghost sm" id="apps-again" type="button">List again</button></div>
+      <ul class="plain" id="apps-list"></ul>
+    </div>
+  </main>
+
+  <main class="list" id="view-disk" hidden>
+    <div class="wrap">
+      <div class="list-head">
+        <h2 class="display">See what's <span>big.</span></h2>
+        <p>Find what takes the most space. Open a folder to look inside, show anything in Finder, or move it to the Trash.</p>
+      </div>
+      <div class="tool-bar">
+        <div class="seg" id="seg" role="group" aria-label="What to show">
+          <button type="button" data-view="places" aria-pressed="true">Biggest places</button>
+          <button type="button" data-view="big" aria-pressed="false">Largest files</button>
+          <button type="button" data-view="old" aria-pressed="false">Old downloads</button>
+        </div>
+        <span class="mono status" id="disk-status"></span>
+      </div>
+      <nav class="trail" id="trail" aria-label="Folder" hidden></nav>
+      <ul class="plain" id="disk-list"></ul>
+    </div>
+  </main>
+
+  <main class="list" id="view-tune" hidden>
+    <div class="wrap">
+      <div class="list-head">
+        <h2 class="display">Small <span>fixes.</span></h2>
+        <p>Things macOS can redo for itself when something looks stuck. Run one only when you need it.</p>
+      </div>
+      <ul class="plain acc" id="tasks"></ul>
+    </div>
+  </main>
+
+  <main class="list" id="view-history" hidden>
+    <div class="wrap">
+      <div class="list-head">
+        <h2 class="display">What <span>went.</span></h2>
+        <p>Everything headroom deleted or moved to the Trash, newest first.</p>
+      </div>
+      <div class="tool-bar"><span class="mono status" id="h-status"></span></div>
+      <ul class="plain" id="h-list"></ul>
     </div>
   </main>
 </div>
@@ -434,7 +583,7 @@
     <ul class="c-list" id="c-list"></ul>
     <div class="c-acts">
       <button class="btn btn-ghost" value="cancel" id="c-no" autofocus>Cancel</button>
-      <button class="btn btn-danger" value="delete" id="c-yes">Delete</button>
+      <button class="btn btn-danger" value="yes" id="c-yes">Delete</button>
     </div>
   </form>
 </dialog>
@@ -443,34 +592,45 @@
 'use strict';
 
 const GROUPS = [
+  { id: 'trash', title: 'Trash and browser caches',
+    blurb: 'Empties the Trash for good, and clears what Safari, Chrome, Firefox, Arc, Brave and Edge keep to load pages faster. History, logins and cookies stay.' },
   { id: 'apps', title: 'App caches',
     blurb: 'Apps rebuild these on their own. The first launch afterwards can be a little slower.' },
   { id: 'temp', title: 'Logs and temporary files',
     blurb: 'Old logs and leftovers that nothing reads any more.' },
+  { id: 'installers', title: 'Installer files',
+    blurb: 'Disk images, packages and zipped apps in Downloads and on the Desktop. Once an app is installed you don’t need them, and you can download them again.' },
   { id: 'dev', title: 'Developer tool caches',
-    blurb: 'Downloads and build data kept by npm, Gradle, Xcode, Docker and the like. Fetched again when a build needs them, so the next build is slower.' },
+    blurb: 'Downloads and build data kept by npm, Gradle, Xcode, Docker, your editor and the like. Fetched again when a build needs them, so the next build is slower.' },
   { id: 'builds', title: 'Project build folders',
-    blurb: 'node_modules, .next, build and target folders in your projects. Your code is untouched, but each project needs an install or a build before it runs again.' },
+    blurb: 'node_modules, .next, dist, build, .build and target folders in your projects. Your code is untouched and folders git tracks are left alone, but each project needs an install or a build before it runs again.' },
+  { id: 'leftovers', title: 'Leftovers of deleted apps', caution: true,
+    blurb: 'Settings and data that apps you removed left in your Library. Only apps headroom can’t find on this Mac are listed. If you install one again, it starts fresh.' },
   { id: 'big', title: 'Emulators, models and other big downloads', caution: true,
     blurb: 'Emulators and simulators lose their apps and data, models need downloading again, and archives are only for reading old crash reports.' },
 ];
 const KNOWN = new Set(GROUPS.map(g => g.id));
+const CAUTION = new Set(GROUPS.filter(g => g.caution).map(g => g.id));
 const NUM = Object.fromEntries(GROUPS.map((g, i) => [g.id, String(i + 1).padStart(2, '0')]));
-const SHORT = { apps: 'App caches', temp: 'Logs & temp', dev: 'Dev tools', builds: 'Build folders', big: 'Emulators & models' };
+const SHORT = { trash: 'Trash & browsers', apps: 'App caches', temp: 'Logs & temp', installers: 'Installers', dev: 'Dev tools', builds: 'Build folders', leftovers: 'App leftovers', big: 'Emulators & models' };
 const SHOWN = 8;          // rows a section shows before "Show N more"
 const POLL_MS = 400;
-const token = location.hash.slice(1);
+const RUN = document.querySelector('meta[name="headroom-run"]').content;
 const $ = id => document.getElementById(id);
 const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+const OPEN_FIRST = ['Open headroom from Applications', 'This window works only when headroom opens it. Find it in Applications or with Spotlight.'];
 
 const S = {
+  view: 'clean',
   rows: new Map(),        // id -> scanned row plus checked / status / note
   sources: [],            // [{id, groups}]
   pending: new Set(),     // sources still being measured
   starting: false,        // waiting for /api/start
+  lastAt: 0,              // when the numbers shown before a fresh scan were measured
   notes: {},              // group -> [{kind, text}]
   open: {},               // group -> expanded
   showAll: {},            // group -> past the first SHOWN rows
+  kept: [],               // rows the person asked never to see again
   disk: null,
   gen: 0,                 // bumps on every scan, so late replies from an old one are dropped
   heroKb: -1,
@@ -488,7 +648,7 @@ const S = {
   gone: false,
 };
 const shells = {};
-let confirmIds = [];
+let onConfirm = null;
 let pollTimer = 0;
 let pollFails = 0;
 let heartbeat = 0;
@@ -540,14 +700,24 @@ function ofSize(part, whole) {
   const b = size(whole);
   return (ua === b.split(' ')[1] ? a : a + ' ' + ua) + ' of ' + b;
 }
+function since(seconds) {
+  const minutes = Math.max(0, Math.round((Date.now() / 1000 - seconds) / 60));
+  if (minutes < 1) return 'a moment ago';
+  if (minutes < 60) return minutes + ' min ago';
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return hours === 1 ? 'an hour ago' : hours + ' hours ago';
+  const days = Math.round(hours / 24);
+  return days === 1 ? 'yesterday' : days + ' days ago';
+}
 const items = n => n === 1 ? '1 item' : n + ' items';
 const sumKb = list => list.reduce((total, row) => total + (row.kb || 0), 0);
 const allRows = () => [...S.rows.values()];
 const bySize = (a, b) => b.kb - a.kb || String(a.name).localeCompare(String(b.name));
 const rowsIn = group => allRows().filter(row => row.group === group).sort(bySize);
-// Rows that can be picked now: not blocked, and not already part of a delete.
-const free = row => !row.blocked && !row.status;
+// Rows that can be picked now: confirmed by this launch's scan, not blocked, not part of a delete.
+const free = row => !row.stale && !row.blocked && !row.status;
 const chosenRows = () => allRows().filter(row => row.checked && free(row)).sort(bySize);
+const safeRows = () => allRows().filter(row => row.safe && !row.recent && free(row));
 
 function announce(text) {
   const live = $('live');
@@ -555,14 +725,20 @@ function announce(text) {
   setTimeout(() => { live.textContent = text; }, 60);
 }
 
+// The app really has gone, or this window belongs to an earlier launch. A TypeError, like the
+// fetch failure it stands for, so every caller's "app closed" path handles it.
+class AppClosed extends TypeError {}
+
 async function api(path, body) {
-  const options = { headers: { 'X-Token': token }, cache: 'no-store' };
+  const options = { headers: { 'X-Headroom': RUN }, cache: 'no-store', credentials: 'same-origin' };
   if (body !== undefined) {
     options.method = 'POST';
     options.headers['Content-Type'] = 'application/json';
     options.body = JSON.stringify(body);
   }
   const reply = await fetch(path, options);       // a TypeError here means the app has closed
+  if (reply.status === 410) { showGone(); throw new AppClosed('earlier launch'); }
+  if (reply.status === 403) { showGone(...OPEN_FIRST); throw new AppClosed('not signed in'); }
   const data = await reply.json().catch(() => ({}));
   if (!reply.ok) {
     const error = new Error(data.error || `headroom answered ${reply.status}.`);
@@ -580,15 +756,12 @@ async function appGone() {
   for (let attempt = 1; attempt <= 3; attempt++) {
     await sleep(400 * attempt);
     try {
-      await fetch('/api/ping', { headers: { 'X-Token': token }, cache: 'no-store' });
-      return false;
+      const reply = await fetch('/api/ping', { headers: { 'X-Headroom': RUN }, cache: 'no-store' });
+      return reply.status === 410 || reply.status === 403;
     } catch (error) { /* still unreachable */ }
   }
   return true;
 }
-
-// The app really has gone. A TypeError, like the fetch failure it stands for.
-class AppClosed extends TypeError {}
 
 // GET with the check above: throws AppClosed once the app is surely gone.
 async function get(path) {
@@ -596,7 +769,7 @@ async function get(path) {
     try {
       return await api(path);
     } catch (error) {
-      if (!(error instanceof TypeError)) throw error;
+      if (error instanceof AppClosed || !(error instanceof TypeError)) throw error;
       if (await appGone()) throw new AppClosed('closed');
       if (attempt === 3) throw new Error('The connection kept dropping.');
     }
@@ -630,6 +803,7 @@ function countTo(kb) {
 function renderHero() {
   const found = sumKb(allRows());
   const scanning = S.starting || S.pending.size > 0;
+  const stale = allRows().some(row => row.stale);
   if (found !== S.heroKb) {
     S.heroKb = found;
     countTo(found);
@@ -641,6 +815,9 @@ function renderHero() {
   } else if (S.deleting) {
     label = 'Can be cleared';
     lede = 'Deleting what you picked. Free space grows as it goes, and you can keep picking.';
+  } else if (stale) {
+    label = 'Found last time';
+    lede = `These numbers are from ${since(S.lastAt)}. headroom is checking them again; rows become pickable as they’re confirmed.`;
   } else if (scanning) {
     label = 'Found so far';
     lede = 'Measuring caches and leftovers on this Mac. You can start picking now.';
@@ -659,6 +836,11 @@ function renderHero() {
     ? (S.sources.length ? `Scanning · ${done} of ${S.sources.length} places` : 'Starting')
     : `${S.sources.length} places checked`;
 
+  // Safe clean: the zero-risk rows, in two clicks.
+  const safe = safeRows();
+  $('safe-box').hidden = scanning || S.deleting || !safe.length;
+  $('safe').textContent = 'Safe clean · ' + size(sumKb(safe));
+
   const disk = S.disk;
   if (!disk) return;
   const total = disk.total_kb;
@@ -667,6 +849,7 @@ function renderHero() {
   const clear = Math.min(found, used);
   $('st-disk').textContent = 'This Mac · ' + size(total);
   $('st-free').textContent = size(freeKb) + ' free';
+  if (S.view !== 'clean') return;
   // What can be cleared, section by section, in the order the list shows them.
   const parts = GROUPS.map(group => ({ id: group.id, title: group.title, kb: sumKb(allRows().filter(row => row.group === group.id)) }))
     .filter(part => part.kb > 0);
@@ -707,9 +890,13 @@ function renderHero() {
 
 function buildShells() {
   const acc = $('acc');
+  let cautionShown = false;
   for (const group of GROUPS) {
     const id = group.id;
-    if (group.caution) acc.append(el('p', { class: 'mono caution-label' }, icon('warn'), 'Check before deleting · these are not caches'));
+    if (group.caution && !cautionShown) {
+      cautionShown = true;
+      acc.append(el('p', { class: 'mono caution-label' }, icon('warn'), 'Check before deleting · these are not caches'));
+    }
     const all = el('input', {
       type: 'checkbox', id: 'all-' + id, key: 'all:' + id,
       onchange: event => tickGroup(id, event.target.checked),
@@ -757,8 +944,9 @@ function isMeasuring(group) {
   return S.sources.some(source => S.pending.has(source.id) && (source.groups || []).includes(group));
 }
 
+// Ticking a whole section leaves out what was used this week; unticking clears everything.
 function tickGroup(group, on) {
-  for (const row of rowsIn(group)) if (free(row)) row.checked = on;
+  for (const row of rowsIn(group)) if (free(row) && !(on && row.recent)) row.checked = on;
   S.justFreed = null;
   render();
 }
@@ -775,7 +963,7 @@ function rowNode(row) {
     el('span', { class: 'row-name', text: row.name }),
     row.detail && el('span', { class: 'row-detail', text: row.detail }));
   const why = row.blocked || row.note;
-  if (why) {
+  if (why && !row.stale) {
     const kind = row.blocked ? 'warn' : row.noteKind || 'info';
     text.append(el('span', { class: 'row-note ' + kind }, icon(kind === 'info' ? 'info' : 'warn'), el('span', { text: why })));
   }
@@ -784,23 +972,31 @@ function rowNode(row) {
   else if (row.status === 'done') slot.append(icon('check'), 'Freed ' + size(row.freed || 0));
   else if (STATUS_TEXT[row.status]) slot.append(STATUS_TEXT[row.status]);
   else slot.append(size(row.kb));
+  const keepable = !row.stale && !row.status && !S.deleting;
   const classes = ['row'];
   if (row.blocked) classes.push('off');
+  if (row.stale) classes.push('stale');
+  if (keepable) classes.push('keepable');
   if (row.status) classes.push('is-' + row.status);
-  return el('li', { class: classes.join(' ') }, el('label', {}, box, text, slot));
+  return el('li', { class: classes.join(' ') }, el('label', {}, box, text, slot),
+    keepable && el('button', {
+      type: 'button', class: 'link row-keep', key: 'keep:' + row.id, text: 'Never offer',
+      'aria-label': `Never offer ${row.name} again`, onclick: () => keep(row),
+    }));
 }
 
 function updateGroup(group) {
   const shell = shells[group.id];
   const mine = rowsIn(group.id);
   const usable = mine.filter(free);
+  const sectionRows = usable.filter(row => !row.recent);
   const ticked = usable.filter(row => row.checked);
   const measuring = isMeasuring(group.id);
   const open = Boolean(S.open[group.id]);
 
-  shell.all.checked = usable.length > 0 && ticked.length === usable.length;
-  shell.all.indeterminate = ticked.length > 0 && ticked.length < usable.length;
-  shell.all.disabled = !usable.length;
+  shell.all.checked = sectionRows.length > 0 && sectionRows.every(row => row.checked);
+  shell.all.indeterminate = ticked.length > 0 && !shell.all.checked;
+  shell.all.disabled = !sectionRows.length;
 
   const sizeKids = [];
   if (measuring) sizeKids.push(spinner());
@@ -827,18 +1023,67 @@ function updateGroup(group) {
   shell.more.textContent = hidden.length ? `Show ${hidden.length} more · ${size(sumKb(hidden))}` : '';
   shell.quiet.hidden = !(measuring || !mine.length);
   shell.quiet.replaceChildren(...(measuring
-    ? [spinner(), mine.length ? 'Still measuring…' : 'Measuring…']
+    ? [spinner(), mine.length ? 'Checking again…' : 'Measuring…']
     : ['Nothing worth clearing here.']));
 }
 
 function addNote(group, kind, text) {
   if (!KNOWN.has(group)) group = GROUPS[0].id;
-  (S.notes[group] = S.notes[group] || []).push({ kind, text });
+  const notes = (S.notes[group] = S.notes[group] || []);
+  if (!notes.some(note => note.text === text)) notes.push({ kind, text });
+}
+
+/* ---------- never offered ---------- */
+
+async function keep(row) {
+  try {
+    await api('/api/protect', { id: row.id });
+  } catch (error) {
+    if (error instanceof TypeError) return error instanceof AppClosed || !(await appGone()) ? null : showGone();
+    return showProblem('Nothing changed', error.message);
+  }
+  S.rows.delete(row.id);
+  render();
+  announce(`${row.name} won’t be offered again. Undo it under Never offered, below the list.`);
+  loadKept();
+}
+
+async function loadKept() {
+  try {
+    S.kept = (await get('/api/protected')).items || [];
+  } catch (error) {
+    if (error instanceof TypeError) showGone();
+    return;
+  }
+  renderKept();
+}
+
+function renderKept() {
+  $('kept').hidden = !S.kept.length;
+  $('kept-title').textContent = `Never offered · ${S.kept.length}`;
+  $('kept-list').replaceChildren(...S.kept.map(entry => el('li', {},
+    el('span', {}, el('span', { class: 'row-name', text: entry.name }),
+      entry.detail && el('span', { class: 'row-detail', text: entry.detail })),
+    el('button', {
+      type: 'button', class: 'btn btn-ghost sm', text: 'Offer again',
+      'aria-label': `Offer ${entry.name} again`,
+      onclick: async event => {
+        event.target.disabled = true;
+        try {
+          await api('/api/unprotect', { id: entry.id });
+        } catch (error) {
+          if (error instanceof AppClosed) return;
+        }
+        announce(`${entry.name} comes back on the next scan.`);
+        loadKept();
+      },
+    }))));
 }
 
 /* ---------- floating pill ---------- */
 
 function renderDock() {
+  $('dock').hidden = S.gone || (S.view !== 'clean' && !S.deleting);
   $('dock-in').classList.toggle('busy', S.deleting);
   $('idle').hidden = S.deleting;
   $('prog').hidden = !S.deleting;
@@ -859,7 +1104,7 @@ function renderDock() {
   let main, sub, warn = false;
   if (chosen.length) {
     main = `${items(chosen.length)} picked`;
-    const risky = chosen.filter(row => row.group === 'big').length;
+    const risky = chosen.filter(row => CAUTION.has(row.group)).length;
     if (risky) {
       sub = risky === 1 ? '1 is not a cache' : `${risky} are not caches`;
       warn = true;
@@ -909,7 +1154,6 @@ async function scan(start) {
   S.pending.clear();
   if (!start) S.sources = [];
   S.starting = true;
-  $('groups').hidden = false;
   render();
   try {
     if (!start) start = await get('/api/start');
@@ -920,7 +1164,17 @@ async function scan(start) {
   S.starting = false;
   S.sources = start.sources || [];
   setDisk(start.disk);
-  for (const source of S.sources) S.pending.add(source.id);
+  // The last scan's numbers show at once, greyed out, until this scan confirms each source.
+  S.lastAt = 0;
+  for (const source of S.sources) {
+    S.pending.add(source.id);
+    const saved = (start.last || {})[source.id];
+    if (!saved || !Array.isArray(saved.items)) continue;
+    S.lastAt = Math.max(S.lastAt, saved.at || 0);
+    for (const item of saved.items) {
+      if (item && KNOWN.has(item.group)) S.rows.set(item.id, { ...item, source: source.id, stale: true, blocked: '', checked: false, status: '', note: '', noteKind: '' });
+    }
+  }
   render();
   await Promise.all(S.sources.map(source => scanSource(source, gen)));
   if (gen === S.gen && !S.gone) {
@@ -931,19 +1185,24 @@ async function scan(start) {
 
 async function scanSource(source, gen) {
   const first = (source.groups || [])[0];
+  const dropStale = () => { for (const [id, row] of S.rows) if (row.stale && row.source === source.id) S.rows.delete(id); };
   try {
     let found;
     try {
       found = await get('/api/scan?source=' + encodeURIComponent(source.id));
     } catch (error) {
       if (error instanceof TypeError) return showGone();
-      if (gen === S.gen) addNote(first, 'error', `Part of this section could not be measured: ${error.message} Scan again in a minute.`);
+      if (gen === S.gen) {
+        dropStale();
+        addNote(first, 'error', `Part of this section could not be measured: ${error.message} Scan again in a minute.`);
+      }
       return;
     }
     if (gen !== S.gen) return;
+    dropStale();
     for (const item of found.items || []) {
       if (!KNOWN.has(item.group)) continue;
-      S.rows.set(item.id, { ...item, blocked: item.blocked || '', checked: false, status: '', note: '', noteKind: '' });
+      S.rows.set(item.id, { ...item, source: source.id, stale: false, blocked: item.blocked || '', checked: false, status: '', note: item.note || '', noteKind: 'info' });
     }
     if (found.notice) addNote(first, 'info', found.notice);
   } finally {
@@ -956,13 +1215,12 @@ async function scanSource(source, gen) {
 
 function failedToStart(error) {
   if (error instanceof TypeError) return showGone();
-  if (error.status === 403) return showGone('This window is out of date', 'Open headroom again from Applications.');
   showGone('headroom could not start', error.message);
 }
 
 // An app may have been quit while this window was in the background.
 function refreshBlocked() {
-  if (!token || S.gone || S.deleting || !S.rows.size) return;
+  if (S.gone || S.deleting || !S.rows.size) return;
   clearTimeout(blockedTimer);
   blockedTimer = setTimeout(async () => {
     let reasons;
@@ -977,7 +1235,7 @@ function refreshBlocked() {
     for (const [id, why] of Object.entries(reasons || {})) {
       const row = S.rows.get(id);
       const reason = why || '';
-      if (!row || row.blocked === reason) continue;
+      if (!row || row.stale || row.blocked === reason) continue;
       row.blocked = reason;
       if (reason) row.checked = false;
       changed = true;
@@ -986,17 +1244,49 @@ function refreshBlocked() {
   }, 150);
 }
 
+/* ---------- one question before anything goes ---------- */
+
+// title, text (string or nodes), lines [[name, size]], yes label, yes style; `then` runs on yes.
+function ask({ title, text, lines = [], yes, style = 'btn-danger' }, then) {
+  $('c-title').textContent = title;
+  $('c-text').replaceChildren(...[].concat(text));
+  const shown = lines.slice(0, 7).map(([name, kb]) => el('li', {},
+    el('span', { class: 'c-name', text: name }),
+    el('span', { class: 'c-size', text: kb === null ? '' : size(kb) })));
+  if (lines.length > 7) {
+    const rest = lines.slice(7);
+    shown.push(el('li', { class: 'c-more' },
+      el('span', { class: 'c-name', text: `and ${rest.length} more` }),
+      el('span', { class: 'c-size', text: size(rest.reduce((t, [, kb]) => t + (kb || 0), 0)) })));
+  }
+  $('c-list').replaceChildren(...shown);
+  $('c-list').hidden = !shown.length;
+  $('c-yes').textContent = yes;
+  $('c-yes').className = 'btn ' + style;
+  onConfirm = then;
+  const dialog = $('confirm');
+  dialog.returnValue = '';
+  dialog.showModal();
+  $('c-no').focus();
+}
+
 /* ---------- deleting ---------- */
 
-function askDelete() {
+function askDelete(safe) {
   const chosen = chosenRows();
   if (!chosen.length || S.stopping) return;
   const n = chosen.length;
-  $('c-title').textContent = S.deleting
-    ? `Also delete ${n === 1 ? 'this' : n + ' more'}?`
-    : `Delete ${n === 1 ? '1 item' : n + ' items'}?`;
+  const ids = chosen.map(row => row.id);
+  const lines = chosen.map(row => [row.name, row.kb]);
+  if (safe === true) {
+    return ask({
+      title: `Clear ${size(sumKb(chosen))} of caches and old files?`,
+      text: 'Only app caches, old logs and temp files, and installers you downloaded over a month ago. Apps make new caches as they need them. They go straight off this Mac, not to the Trash.',
+      lines, yes: 'Delete ' + size(sumKb(chosen)),
+    }, () => startDelete(ids));
+  }
   // One sentence: where they go, and the one thing worth a second look.
-  const risky = chosen.filter(row => row.group === 'big').length;
+  const risky = chosen.filter(row => CAUTION.has(row.group)).length;
   const text = [S.deleting
     ? 'They go once the current delete finishes, straight off this Mac, not to the Trash.'
     : 'They go straight off this Mac, not to the Trash.'];
@@ -1005,23 +1295,17 @@ function askDelete() {
       : `${risky} of them ${risky === 1 ? 'isn’t a cache' : 'aren’t caches'}`;
     text.push(' ', el('strong', { text: `${which}, so ${risky === 1 ? 'it won’t' : 'they won’t'} come back on ${risky === 1 ? 'its' : 'their'} own.` }));
   }
-  $('c-text').replaceChildren(...text);
-  $('c-yes').textContent = 'Delete ' + size(sumKb(chosen));
-  const lines = chosen.slice(0, 6).map(row => el('li', {},
-    el('span', { class: 'c-name', text: row.name }),
-    el('span', { class: 'c-size', text: size(row.kb) })));
-  if (n > 6) {
-    const rest = chosen.slice(6);
-    lines.push(el('li', { class: 'c-more' },
-      el('span', { class: 'c-name', text: `and ${rest.length} more` }),
-      el('span', { class: 'c-size', text: size(sumKb(rest)) })));
-  }
-  $('c-list').replaceChildren(...lines);
-  confirmIds = chosen.map(row => row.id);
-  const dialog = $('confirm');
-  dialog.returnValue = '';
-  dialog.showModal();
-  $('c-no').focus();
+  ask({
+    title: S.deleting ? `Also delete ${n === 1 ? 'this' : n + ' more'}?` : `Delete ${n === 1 ? '1 item' : n + ' items'}?`,
+    text, lines, yes: 'Delete ' + size(sumKb(chosen)),
+  }, () => startDelete(ids));
+}
+
+function safeClean() {
+  for (const row of S.rows.values()) row.checked = row.safe && !row.recent && free(row);
+  S.justFreed = null;
+  render();
+  askDelete(true);
 }
 
 async function startDelete(ids) {
@@ -1040,6 +1324,7 @@ async function startDelete(ids) {
   try {
     await api('/api/delete', { ids });
   } catch (error) {
+    if (error instanceof AppClosed) return;
     if (error instanceof TypeError) return (await appGone()) ? showGone() : joinRunning();
     if (error.status === 409) return joinRunning();
     render();
@@ -1079,7 +1364,7 @@ function watch(attached, first) {
     deleting: true, attached, stopping: false, applied: 0, fraction: 0, fracTotal: 0, currentId: null,
     justFreed: null, follow: !attached, queue: [], batch: { kb: 0, count: 0, results: [], stopped: false },
   });
-  if (attached) $('groups').hidden = true;
+  if (attached) $('view-clean').hidden = true;
   const stop = $('stop');
   stop.disabled = false;
   stop.textContent = 'Stop';
@@ -1100,6 +1385,7 @@ async function poll() {
     progress = await get('/api/progress');
     pollFails = 0;
   } catch (error) {
+    if (error instanceof AppClosed && S.gone) return;
     if (error instanceof TypeError) {
       return showGone('headroom has closed', 'It may have stopped part-way through deleting. Open it again from Applications to see what is left.');
     }
@@ -1170,7 +1456,7 @@ function applyProgress(progress) {
 
 // Keep the row being deleted in sight, until the person scrolls somewhere else themselves.
 function followRow(id) {
-  if (!S.follow) return;
+  if (!S.follow || S.view !== 'clean') return;
   const box = document.querySelector(`[data-key="${CSS.escape('row:' + id)}"]`);
   const row = box && box.closest('li');
   if (!row) return;
@@ -1201,6 +1487,7 @@ async function startQueued() {
   try {
     await api('/api/delete', { ids });
   } catch (error) {
+    if (error instanceof AppClosed) return;
     if (error instanceof TypeError && await appGone()) return showGone();
     return wrapUp(`The queued ${items(ids.length)} did not start: ${error.message}`);
   }
@@ -1238,7 +1525,10 @@ function wrapUp(trouble) {
   document.title = 'headroom';
   render();
   showResult(freed, results.length, problems, notReached, trouble);
-  if (attached) scan();
+  if (attached) {
+    $('view-clean').hidden = S.view !== 'clean';
+    scan();
+  }
 }
 
 function showResult(freed, done, problems, notReached, trouble) {
@@ -1262,6 +1552,7 @@ function showResult(freed, done, problems, notReached, trouble) {
           ...problems.map(([name, why]) => el('li', {}, el('b', { text: name }), ' · ' + why))))));
   $('result').replaceChildren(block);
   announce([title.textContent + '.', ...lines, problems.length ? `${items(problems.length)} not fully deleted.` : ''].join(' '));
+  if (S.view !== 'clean') return;
   block.focus({ preventScroll: true });
   block.scrollIntoView({ block: 'nearest', behavior: reduceMotion() ? 'auto' : 'smooth' });
 }
@@ -1275,13 +1566,312 @@ function showProblem(title, text) {
       el('h2', { class: 'display r-title', text: title }),
       el('div', { class: 'r-cols' }, el('p', { text }))));
   $('result').replaceChildren(block);
+  $('result').hidden = false;
   block.focus({ preventScroll: true });
   block.scrollIntoView({ block: 'nearest' });
 }
 
 function dismissResult() {
   $('result').replaceChildren();
+  if (S.view !== 'clean') return;
   $('del').disabled ? $('rescan').focus() : $('del').focus();
+}
+
+/* ---------- views ---------- */
+
+const VIEWS = ['clean', 'apps', 'disk', 'tune', 'history'];
+
+function show(view) {
+  if (S.gone || !VIEWS.includes(view)) return;
+  const first = S.view !== view;
+  S.view = view;
+  for (const name of VIEWS) $('view-' + name).hidden = name !== view || (name === 'clean' && S.deleting && S.attached);
+  for (const tab of $('tabs').children) {
+    if (tab.dataset.view === view) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
+  }
+  $('clean-hero').hidden = view !== 'clean';
+  $('top').classList.toggle('slim', view !== 'clean');
+  $('result').hidden = view !== 'clean';
+  if (first) scrollTo({ top: 0 });
+  if (view === 'apps' && !A.loaded && !A.loading) loadApps();
+  if (view === 'disk' && !D.data && !D.loading) loadDisk('places', '');
+  if (view === 'tune') renderTasks();
+  if (view === 'history') loadHistory();
+  render();
+}
+
+function quietLine(...kids) {
+  return el('li', {}, el('p', { class: 'quiet' }, ...kids));
+}
+
+/* ---------- uninstaller ---------- */
+
+const A = { loaded: false, loading: false, items: [], results: {}, busy: null, error: '' };
+
+async function loadApps() {
+  A.loading = true;
+  A.error = '';
+  renderApps();
+  try {
+    A.items = (await get('/api/apps')).items || [];
+    A.loaded = true;
+    A.results = {};
+  } catch (error) {
+    if (error instanceof TypeError) return showGone();
+    A.error = error.message;
+  }
+  A.loading = false;
+  renderApps();
+}
+
+function renderApps() {
+  const total = A.items.reduce((t, app) => t + app.kb + sumKb(app.leftovers), 0);
+  $('apps-status').replaceChildren(...(A.loading
+    ? [spinner(), 'Measuring your apps']
+    : [A.error ? 'Could not list apps' : `${A.items.length} apps · ${size(total)}`]));
+  $('apps-again').disabled = A.loading || A.busy !== null;
+  if (A.loading) return $('apps-list').replaceChildren(quietLine('The first time can take a minute: headroom measures every app and what it keeps.'));
+  if (A.error) return $('apps-list').replaceChildren(quietLine(A.error));
+  $('apps-list').replaceChildren(...A.items.map(appNode));
+}
+
+function appNode(app) {
+  const left = sumKb(app.leftovers);
+  const result = A.results[app.id];
+  const facts = [app.version && 'Version ' + app.version, app.used && 'last used ' + app.used]   // Spotlight has no date for some apps; then say nothing
+    .filter(Boolean).join(' · ');
+  const keeps = app.leftovers.length
+    ? `Keeps ${app.leftovers.length === 1 ? '1 thing' : app.leftovers.length + ' things'} in your Library · ${size(left)}`
+    : 'Keeps nothing in your Library that headroom can find';
+  const main = el('div', {},
+    el('p', { class: 'item-name', text: app.name }),
+    el('span', { class: 'row-detail', text: facts }),
+    el('span', { class: 'row-detail', text: keeps }));
+  if (app.blocked && !result) main.append(el('span', { class: 'row-note warn' }, icon('warn'), el('span', { text: app.blocked })));
+  if (result) main.append(el('span', { class: 'done-note' + (result.ok ? '' : ' bad') }, icon(result.ok ? 'check' : 'warn'), el('span', { text: result.text })));
+  const button = el('button', {
+    type: 'button', class: 'btn btn-ghost sm', text: A.busy === app.id ? 'Moving…' : 'Uninstall',
+    disabled: Boolean(app.blocked) || A.busy !== null || Boolean(result && result.ok),
+    'aria-label': 'Uninstall ' + app.name, onclick: () => askUninstall(app),
+  });
+  return el('li', { class: 'item' }, main,
+    el('div', { class: 'item-side' }, el('span', { class: 'item-size', text: size(app.kb + left) }), result && result.ok ? null : button));
+}
+
+function askUninstall(app) {
+  const left = sumKb(app.leftovers);
+  const text = [`${app.name}${app.leftovers.length ? ` and the ${app.leftovers.length === 1 ? 'one thing' : app.leftovers.length + ' things'} it keeps in your Library` : ''} go to the Trash. Empty the Trash to free ${size(app.kb + left)}.`];
+  if (app.password) text.push(` macOS asks for your password, because ${app.name} was installed for everyone on this Mac.`);
+  ask({
+    title: `Move ${app.name} to the Trash?`, text,
+    lines: [[app.name + '.app', app.kb], ...app.leftovers.map(item => [item.name, item.kb])],
+    yes: 'Move to Trash', style: 'btn-ink',
+  }, () => uninstall(app));
+}
+
+async function uninstall(app) {
+  A.busy = app.id;
+  renderApps();
+  let out;
+  try {
+    out = await api('/api/uninstall', { id: app.id });
+  } catch (error) {
+    A.busy = null;
+    if (error instanceof TypeError) return error instanceof AppClosed ? null : showGone();
+    A.results[app.id] = { ok: false, text: error.message };
+    return renderApps();
+  }
+  A.busy = null;
+  const failed = out.failed || [];
+  if (!failed.length) A.results[app.id] = { ok: true, text: 'In the Trash now, with what it kept in your Library.' };
+  else if (out.moved) A.results[app.id] = { ok: false, text: `In the Trash, but ${failed.length === 1 ? '1 thing' : failed.length + ' things'} stayed: ${failed[0][1]}` };
+  else A.results[app.id] = { ok: false, text: failed[0][1] };
+  renderApps();
+  announce(`${app.name}: ${A.results[app.id].text}`);
+}
+
+/* ---------- disk explorer ---------- */
+
+const D = { view: 'places', id: '', data: null, loading: false, error: '', results: {} };
+
+async function loadDisk(view, id) {
+  Object.assign(D, { view, id, loading: true, error: '', data: null });
+  renderDisk();
+  try {
+    D.data = await get(`/api/explore?view=${encodeURIComponent(view)}&id=${encodeURIComponent(id)}`);
+  } catch (error) {
+    if (error instanceof TypeError) return showGone();
+    D.error = error.message;
+  }
+  D.loading = false;
+  renderDisk();
+}
+
+function renderDisk() {
+  for (const button of $('seg').children) button.setAttribute('aria-pressed', String(button.dataset.view === D.view));
+  const data = D.data || {};
+  const trail = $('trail');
+  trail.hidden = D.view !== 'places' || !D.id;
+  if (!trail.hidden) {
+    const crumbs = [el('button', { type: 'button', text: 'All places', onclick: () => loadDisk('places', '') })];
+    (data.trail || []).forEach((crumb, i, list) => {
+      crumbs.push(el('span', { text: '›', 'aria-hidden': 'true' }));
+      crumbs.push(i === list.length - 1
+        ? el('b', { text: crumb.name, 'aria-current': 'location' })
+        : el('button', { type: 'button', text: crumb.name, onclick: () => loadDisk('places', crumb.id) }));
+    });
+    trail.replaceChildren(...crumbs);
+  }
+  const waiting = { places: D.id ? 'Measuring this folder' : 'Measuring your home folder and apps',
+    big: 'Asking Spotlight', old: 'Looking through Downloads' }[D.view];
+  $('disk-status').replaceChildren(...(D.loading ? [spinner(), waiting] : [D.error ? 'Something went wrong' : '']));
+  const list = $('disk-list');
+  if (D.loading) return list.replaceChildren(quietLine(D.view === 'places' && !D.id ? 'The first look can take a minute on a full disk.' : 'One moment.'));
+  if (D.error) return list.replaceChildren(quietLine(D.error));
+  const rows = data.items || [];
+  const lines = [];
+  if (data.partial) lines.push(quietLine(icon('info'), 'macOS keeps some folders here locked, so their sizes are at least what is shown.'));
+  if (data.note) lines.push(quietLine(data.note));
+  const most = Math.max(1, ...rows.map(row => row.kb));
+  for (const row of rows) lines.push(diskNode(row, most));
+  if (data.rest) lines.push(quietLine(`And ${data.rest.count} smaller ${data.rest.count === 1 ? 'item' : 'items'} · ${size(data.rest.kb)}`));
+  list.replaceChildren(...lines);
+}
+
+function diskNode(row, most) {
+  const result = D.results[row.id];
+  const name = row.folder && !result
+    ? el('button', { type: 'button', class: 'open-dir', text: row.name, onclick: () => loadDisk('places', row.id) })
+    : el('p', { class: 'item-name', text: row.name });
+  const main = el('div', {}, name,
+    row.detail && el('span', { class: 'row-detail', text: row.detail }),
+    row.partial && el('span', { class: 'row-detail', text: 'Partly locked by macOS, so at least this much' }),
+    el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: `width:${Math.max(0.5, row.kb / most * 100).toFixed(1)}%` })));
+  if (result) main.append(el('span', { class: 'done-note' + (result.ok ? '' : ' bad') }, icon(result.ok ? 'check' : 'warn'), el('span', { text: result.text })));
+  const acts = result && result.ok ? [] : [
+    el('button', { type: 'button', class: 'link', text: 'Show in Finder', 'aria-label': `Show ${row.name} in Finder`, onclick: () => reveal(row) }),
+    row.trash && el('button', { type: 'button', class: 'link', text: 'Move to Trash', 'aria-label': `Move ${row.name} to the Trash`, onclick: () => askTrash(row) }),
+  ];
+  return el('li', { class: 'item' }, main,
+    el('div', { class: 'item-side' }, el('span', { class: 'item-acts' }, ...acts), el('span', { class: 'item-size', text: size(row.kb) })));
+}
+
+async function reveal(row) {
+  try {
+    await api('/api/reveal', { id: row.id });
+  } catch (error) {
+    if (error instanceof TypeError) return error instanceof AppClosed ? null : showGone();
+    D.results[row.id] = { ok: false, text: error.message };
+    renderDisk();
+  }
+}
+
+function askTrash(row) {
+  ask({
+    title: `Move “${row.name}” to the Trash?`,
+    text: `You can still put it back from the Trash. Empty the Trash to free ${size(row.kb)}.`,
+    yes: 'Move to Trash', style: 'btn-ink',
+  }, async () => {
+    let out;
+    try {
+      out = await api('/api/trash', { id: row.id });
+    } catch (error) {
+      if (error instanceof TypeError) return error instanceof AppClosed ? null : showGone();
+      out = { error: error.message };
+    }
+    D.results[row.id] = out.error ? { ok: false, text: out.error } : { ok: true, text: 'In the Trash now.' };
+    renderDisk();
+    announce(`${row.name}: ${D.results[row.id].text}`);
+  });
+}
+
+/* ---------- maintenance ---------- */
+
+const TASKS = [
+  { id: 'quicklook', title: 'Refresh Quick Look',
+    text: 'Clears saved previews and reloads Quick Look, for thumbnails that look blank or out of date.' },
+  { id: 'dns', title: 'Flush the DNS cache', admin: true,
+    text: 'Forgets saved website addresses, for a site that moved or a network that won’t connect after a change.' },
+  { id: 'icons', title: 'Rebuild the icon cache', admin: true,
+    text: 'Clears saved app icons and restarts the Dock, for icons that are blank or show the wrong picture.' },
+  { id: 'spotlight', title: 'Rebuild the Spotlight index', admin: true, heavy: true,
+    text: 'Makes Spotlight read every file again, for searches that miss things you know are there. It runs for hours and slows this Mac down while it does.' },
+];
+const T = { busy: null, results: {} };
+
+function renderTasks() {
+  $('tasks').replaceChildren(...TASKS.map(task => {
+    const result = T.results[task.id];
+    const head = el('h3', {}, task.title,
+      task.admin && el('span', { class: 'tag plain', text: 'ASKS FOR YOUR PASSWORD' }),
+      task.heavy && el('span', { class: 'tag', text: 'TAKES HOURS' }));
+    const main = el('div', {}, head, el('p', { text: task.text }));
+    if (result) main.append(el('p', { class: 'done-note' + (result.ok ? '' : ' bad') }, icon(result.ok ? 'check' : 'warn'), el('span', { text: result.text })));
+    return el('li', { class: 'task' }, main, el('button', {
+      type: 'button', class: 'btn btn-ghost sm', disabled: T.busy !== null,
+      text: T.busy === task.id ? 'Running…' : 'Run', 'aria-label': 'Run: ' + task.title,
+      onclick: () => task.heavy ? ask({
+        title: 'Rebuild the Spotlight index?',
+        text: 'Spotlight reads every file on this Mac again. That takes hours, uses a lot of memory and battery, and search misses things until it’s done.',
+        yes: 'Rebuild', style: 'btn-ink',
+      }, () => runTask(task)) : runTask(task),
+    }));
+  }));
+}
+
+async function runTask(task) {
+  T.busy = task.id;
+  renderTasks();
+  try {
+    T.results[task.id] = await api('/api/maintain', { id: task.id });
+  } catch (error) {
+    if (error instanceof TypeError) { T.busy = null; return error instanceof AppClosed ? null : showGone(); }
+    T.results[task.id] = { ok: false, text: error.message };
+  }
+  T.busy = null;
+  renderTasks();
+  announce(`${task.title}: ${T.results[task.id].text}`);
+}
+
+/* ---------- history ---------- */
+
+const RESULT_TEXT = { deleted: 'Deleted', partly: 'Partly done', failed: 'Not done', trashed: 'Moved to the Trash' };
+const SECTION_TEXT = { ...Object.fromEntries(GROUPS.map(g => [g.id, g.title])), uninstall: 'Uninstalled', disk: 'Disk explorer' };
+
+function when(at) {
+  const date = new Date(at);
+  if (isNaN(date)) return '';
+  const time = date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  return new Date().toDateString() === date.toDateString() ? 'Today, ' + time
+    : date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) + ', ' + time;
+}
+
+async function loadHistory() {
+  $('h-status').replaceChildren(spinner(), 'Reading');
+  let data;
+  try {
+    data = await get('/api/history');
+  } catch (error) {
+    if (error instanceof TypeError) return showGone();
+    $('h-status').textContent = 'Could not read the history';
+    return;
+  }
+  const entries = data.items || [];
+  $('h-status').textContent = entries.length ? `${entries.length === 1 ? '1 entry' : entries.length + ' entries'} · kept in ${data.file}` : '';
+  if (!entries.length) return $('h-list').replaceChildren(quietLine('Nothing yet. Whatever headroom deletes or moves to the Trash shows up here.'));
+  $('h-list').replaceChildren(...entries.map(entry => {
+    const paths = Array.isArray(entry.paths) ? entry.paths : [];
+    const where = entry.command || (paths.length ? paths[0] + (paths.length > 1 ? ` and ${paths.length - 1} more` : '') : '');
+    const ok = entry.result === 'deleted' || entry.result === 'trashed';
+    const main = el('div', {},
+      el('p', { class: 'mono h-when', text: [when(entry.at), SECTION_TEXT[entry.section] || ''].filter(Boolean).join(' · ') }),
+      el('p', { class: 'item-name', text: String(entry.what || '') }),
+      where && el('span', { class: 'row-detail', text: where }),
+      el('span', { class: 'done-note' + (ok ? '' : ' bad') }, icon(ok ? 'check' : 'warn'),
+        el('span', { text: (RESULT_TEXT[entry.result] || String(entry.result || '')) + (entry.error ? ': ' + entry.error : '') })));
+    return el('li', { class: 'item' }, main, el('div', { class: 'item-side' }, el('span', { class: 'item-size', text: entry.kb ? size(entry.kb) : '' })));
+  }));
 }
 
 /* ---------- closed ---------- */
@@ -1306,6 +1896,7 @@ function showGone(title = 'headroom has closed', text = 'Open it again from Appl
 
 $('del').addEventListener('click', askDelete);
 $('add').addEventListener('click', askDelete);
+$('safe').addEventListener('click', safeClean);
 $('rescan').addEventListener('click', () => {
   $('result').replaceChildren();
   S.justFreed = null;
@@ -1320,6 +1911,7 @@ $('stop').addEventListener('click', async () => {
   try {
     await api('/api/stop', {});
   } catch (error) {
+    if (error instanceof AppClosed) return;
     if (error instanceof TypeError && await appGone()) return showGone();
     S.stopping = false;
     stop.disabled = false;
@@ -1328,23 +1920,30 @@ $('stop').addEventListener('click', async () => {
   }
 });
 $('confirm').addEventListener('close', () => {
-  if ($('confirm').returnValue === 'delete' && !S.gone) startDelete(confirmIds);
+  const then = onConfirm;
+  onConfirm = null;
+  if ($('confirm').returnValue === 'yes' && then && !S.gone) then();
 });
+$('tabs').addEventListener('click', event => {
+  const tab = event.target.closest('[data-view]');
+  if (tab) show(tab.dataset.view);
+});
+$('seg').addEventListener('click', event => {
+  const button = event.target.closest('[data-view]');
+  if (button && !D.loading) loadDisk(button.dataset.view, '');
+});
+$('apps-again').addEventListener('click', loadApps);
 addEventListener('resize', () => { if (S.disk && !S.gone) renderHero(); });
 
 async function boot() {
   buildShells();
   requestAnimationFrame(() => document.body.classList.add('ready'));
-  if (!token) {
-    showGone('Open headroom from Applications', 'This window works only when headroom opens it. Find it in Applications or with Spotlight.');
-    return;
-  }
   S.starting = true;
   render();
   heartbeat = setInterval(() => {
-    api('/api/ping').catch(async () => { if (await appGone()) showGone(); });
+    api('/api/ping').catch(async error => { if (!(error instanceof AppClosed) && await appGone()) showGone(); });
   }, 60000);
-  addEventListener('pagehide', () => navigator.sendBeacon('/api/bye', token));
+  addEventListener('pagehide', () => navigator.sendBeacon('/api/bye', RUN));
   addEventListener('focus', refreshBlocked);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshBlocked(); });
   let start, progress;
@@ -1353,6 +1952,7 @@ async function boot() {
   } catch (error) {
     return failedToStart(error);
   }
+  loadKept();
   if (progress.running) {
     S.starting = false;
     S.sources = start.sources || [];
