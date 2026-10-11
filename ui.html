@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <meta name="headroom-run" content="__RUN__">
-<script>
+<meta name="headroom-arrived" content="__ARRIVED__">
+<script nonce="__NONCE__">
   // The look picked last time (Auto, Light or Dark), set before anything is drawn. Auto when unknown.
   try { var look = localStorage.getItem('headroom-theme'); if (look === 'light' || look === 'dark') document.documentElement.dataset.theme = look; } catch (error) {}
 </script>
@@ -383,6 +384,13 @@
   .item-name { font-weight: 600; overflow-wrap: anywhere; }
   .item-side { display: flex; align-items: center; gap: 14px; justify-content: flex-end; }
   .item-size { font: 12.5px/1.4 var(--f-mono); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* The Uninstall list reads as a table: app, last used, size. */
+  #apps-list .item-used { width: 7.5rem; font: 12.5px/1.4 var(--f-mono); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #apps-list .item-used small { display: block; font-size: 11px; color: var(--muted); }
+  #apps-list .item-size { min-width: 4.2rem; text-align: right; }
+  #apps-list .item.head { padding: 10px 0; font: 11px/1.4 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  #apps-list .item.head .item-used, #apps-list .item.head .item-size { font: inherit; }
+  #apps-list .item.head .btn { visibility: hidden; height: 0; min-height: 0; padding-block: 0; border-block-width: 0; text-transform: none; letter-spacing: normal; }
   .item-acts { display: flex; flex-wrap: wrap; gap: 4px 16px; }
   .done-note { display: flex; gap: 6px; align-items: center; font-size: 13px; font-weight: 500; color: var(--accent); }
   .done-note.bad { color: var(--warn); }
@@ -499,7 +507,7 @@
   .gone-in .mark { width: 44px; height: 44px; }
   .gone-in .mono { color: var(--band-accent); }
   .gone-in h1 { font-size: clamp(44px, 8vw, 92px); }
-  .gone-in p:last-child { color: var(--band-text-2); font-size: 17px; max-width: 46ch; }
+  .gone-in p:last-child { color: var(--band-text-2); font-size: 17px; max-width: 46ch; white-space: pre-line; }
 
   @media (max-width: 760px) {
     .tabs { width: 100%; justify-content: space-between; }
@@ -749,7 +757,7 @@
   </form>
 </dialog>
 
-<script>
+<script nonce="__NONCE__">
 'use strict';
 
 const GROUPS = [
@@ -777,9 +785,12 @@ const SHORT = { trash: 'Trash & browsers', apps: 'App caches', temp: 'Logs & tem
 const SHOWN = 8;          // rows a section shows before "Show N more"
 const POLL_MS = 400;
 const RUN = document.querySelector('meta[name="headroom-run"]').content;
+const ARRIVED = document.querySelector('meta[name="headroom-arrived"]').content;   // 'cross-site': a link on another site led here
 const $ = id => document.getElementById(id);
 const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 const OPEN_FIRST = ['Open headroom from Applications', 'This window works only when headroom opens it. Find it in Applications or with Spotlight.'];
+const OPENING = ['headroom is opening in a new tab', 'You can close this one.\nIf nothing opens, it opened in your default browser, or open headroom from Applications.'];
+const CLOSED = ['headroom has closed', 'Open it again from Applications to carry on.'];
 
 const S = {
   view: 'clean',
@@ -890,8 +901,61 @@ function announce(text) {
 // fetch failure it stands for, so every caller's "app closed" path handles it.
 class AppClosed extends TypeError {}
 
+// Being signed in takes two things: a cookie, which the browser keeps and sends by itself, and
+// this key, kept in this address's own storage and sent with every call. A cookie alone isn't
+// tied to a port on localhost, so another program on this Mac could be sent it; the storage is,
+// so the key never leaves this page. With storage switched off, the key lasts as long as this window.
+const KEY_AT = 'headroom-key';
+let KEY = '';
+try { KEY = localStorage.getItem(KEY_AT) || ''; } catch (error) { /* this window only */ }
+function keepKey(key) {
+  KEY = key;
+  try { if (key) localStorage.setItem(KEY_AT, key); else localStorage.removeItem(KEY_AT); } catch (error) { /* this window only */ }
+}
+const post = (path, body) => fetch(path, { method: 'POST', cache: 'no-store', credentials: 'same-origin',
+  headers: { 'X-Headroom': RUN, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+// The address headroom opens carries a login code (?k=...). Swap it for the cookie and the key,
+// and leave a clean address. A code that was used already changes nothing and says nothing: the
+// Dock icon opens the same address again, and the key from the first time is still here.
+async function signIn() {
+  const code = new URLSearchParams(location.search).get('k');
+  if (location.search) history.replaceState(null, '', '/');
+  if (code) {
+    try {
+      const reply = await post('/api/login', { code });
+      if (reply.ok) keepKey((await reply.json()).key);
+    } catch (error) { /* the app has closed: the first call after this says so */ }
+  }
+  return Boolean(KEY);
+}
+
+// Not signed in: no key here, or headroom turned it away. headroom opens a tab of its own, signed
+// in, and this one only says so. It stays a message: headroom quits when its tab closes, and a
+// second live tab would get in the way of that. A visit that a link on another site started
+// doesn't get to ask for a tab.
+let asking = false;
+async function askIn() {
+  if (asking) return;
+  asking = true;
+  keepKey('');
+  const invited = ARRIVED !== 'cross-site';
+  // Said at once, before headroom answers: whoever made the call that was turned away is about
+  // to say "headroom has closed", and the first message shown is the one that stays.
+  showGone(...(invited ? OPENING : OPEN_FIRST));
+  if (!invited) return;
+  const say = (title, text) => { $('gone-title').textContent = title; $('gone-text').textContent = text; };
+  try {
+    const reply = await post('/api/invite', {});
+    if (reply.status === 410) say(...CLOSED);
+    else if (!reply.ok) say(...OPEN_FIRST);
+  } catch (error) {
+    say(...CLOSED);
+  }
+}
+
 async function api(path, body) {
-  const options = { headers: { 'X-Headroom': RUN }, cache: 'no-store', credentials: 'same-origin' };
+  const options = { headers: { 'X-Headroom': RUN, 'X-Headroom-Key': KEY }, cache: 'no-store', credentials: 'same-origin' };
   if (body !== undefined) {
     options.method = 'POST';
     options.headers['Content-Type'] = 'application/json';
@@ -899,7 +963,7 @@ async function api(path, body) {
   }
   const reply = await fetch(path, options);       // a TypeError here means the app has closed
   if (reply.status === 410) { showGone(); throw new AppClosed('earlier launch'); }
-  if (reply.status === 403) { showGone(...OPEN_FIRST); throw new AppClosed('not signed in'); }
+  if (reply.status === 403) { askIn(); throw new AppClosed('not signed in'); }
   const data = await reply.json().catch(() => ({}));
   if (!reply.ok) {
     const error = new Error(data.error || `headroom answered ${reply.status}.`);
@@ -917,7 +981,7 @@ async function appGone() {
   for (let attempt = 1; attempt <= 3; attempt++) {
     await sleep(400 * attempt);
     try {
-      const reply = await fetch('/api/ping', { headers: { 'X-Headroom': RUN }, cache: 'no-store' });
+      const reply = await fetch('/api/ping', { headers: { 'X-Headroom': RUN, 'X-Headroom-Key': KEY }, cache: 'no-store' });
       return reply.status === 410 || reply.status === 403;
     } catch (error) { /* still unreachable */ }
   }
@@ -1805,20 +1869,25 @@ function renderApps() {
   $('apps-again').disabled = A.loading || A.busy !== null;
   if (A.loading) return $('apps-list').replaceChildren(quietLine('The first time can take a minute: headroom measures every app and what it keeps.'));
   if (A.error) return $('apps-list').replaceChildren(quietLine(A.error));
-  $('apps-list').replaceChildren(...A.items.map(appNode));
+  const head = el('li', { class: 'item head', 'aria-hidden': 'true' }, el('div', { text: 'App' }),
+    el('div', { class: 'item-side' }, el('span', { class: 'item-used', text: 'Last used' }), el('span', { class: 'item-size', text: 'Size' }),
+      el('span', { class: 'btn btn-ghost sm', text: 'Uninstall' })));     // an unseen button keeps the columns lined up
+  $('apps-list').replaceChildren(head, ...A.items.map(appNode));
 }
 
 function appNode(app) {
   const left = sumKb(app.leftovers);
   const result = A.results[app.id];
-  const facts = [app.version && 'Version ' + app.version, app.used && 'last used ' + app.used]   // Spotlight has no date for some apps; then say nothing
-    .filter(Boolean).join(' · ');
+  const facts = app.version ? 'Version ' + app.version : '';
+  // Spotlight has no date for some apps; then the column says so.
+  const used = el('span', { class: 'item-used', 'aria-label': app.used_on ? `Last used ${app.used_on}, ${app.used}` : 'Last used: not recorded' },
+    app.used_on || '–', el('small', { text: app.used_on ? app.used : 'not recorded' }));
   const keeps = app.leftovers.length
     ? `Keeps ${app.leftovers.length === 1 ? '1 thing' : app.leftovers.length + ' things'} in your Library · ${size(left)}`
     : 'Keeps nothing in your Library that headroom can find';
   const main = el('div', {},
     el('p', { class: 'item-name', text: app.name }),
-    el('span', { class: 'row-detail', text: facts }),
+    facts && el('span', { class: 'row-detail', text: facts }),
     el('span', { class: 'row-detail', text: keeps }));
   if (app.blocked && !result) main.append(el('span', { class: 'row-note warn' }, icon('warn'), el('span', { text: app.blocked })));
   if (result) main.append(el('span', { class: 'done-note' + (result.ok ? '' : ' bad') }, icon(result.ok ? 'check' : 'warn'), el('span', { text: result.text })));
@@ -1828,7 +1897,7 @@ function appNode(app) {
     'aria-label': 'Uninstall ' + app.name, onclick: () => askUninstall(app),
   });
   return el('li', { class: 'item' }, main,
-    el('div', { class: 'item-side' }, el('span', { class: 'item-size', text: size(app.kb + left) }), result && result.ok ? null : button));
+    el('div', { class: 'item-side' }, used, el('span', { class: 'item-size', text: size(app.kb + left) }), result && result.ok ? null : button));
 }
 
 function askUninstall(app) {
@@ -2455,7 +2524,7 @@ function renderSpace() {
 addEventListener('resize', () => { if (S.view === 'history' && SP.data) renderSpace(); });
 
 
-function showGone(title = 'headroom has closed', text = 'Open it again from Applications to carry on.') {
+function showGone(title = CLOSED[0], text = CLOSED[1]) {
   if (S.gone) return;
   S.gone = true;
   clearTimeout(pollTimer);
@@ -2530,6 +2599,9 @@ $('looks').addEventListener('click', event => {
 addEventListener('resize', () => { if (S.disk && !S.gone) renderHero(); });
 
 async function boot() {
+  $('app').hidden = $('dock').hidden = true;      // nothing of the app shows until this browser is signed in
+  if (!(await signIn())) return askIn();
+  $('app').hidden = false;
   buildShells();
   requestAnimationFrame(() => document.body.classList.add('ready'));
   S.starting = true;
@@ -2537,7 +2609,8 @@ async function boot() {
   heartbeat = setInterval(() => {
     api('/api/ping').catch(async error => { if (!(error instanceof AppClosed) && await appGone()) showGone(); });
   }, 60000);
-  addEventListener('pagehide', () => navigator.sendBeacon('/api/bye', RUN));
+  // A beacon can't carry headers, so the launch and the key go in its body; the cookie goes by itself.
+  addEventListener('pagehide', () => navigator.sendBeacon('/api/bye', JSON.stringify({ run: RUN, key: KEY })));
   addEventListener('focus', refreshBlocked);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshBlocked(); });
   let start, progress;

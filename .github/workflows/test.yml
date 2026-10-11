@@ -1,0 +1,22 @@
+# Runs the tests on every push to main and every pull request. They use a throwaway home folder
+# and stand in for Finder, so nothing on the runner is deleted or moved.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      # Pinned to the commit behind v7.0.1, so a moved tag can't change what runs here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: python3 --version && python3 test_cleaner.py

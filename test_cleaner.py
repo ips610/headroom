@@ -32,10 +32,24 @@ cleaner.TOOL_DIRS = [os.path.join(box, "bin")]
 cleaner.PORTS = []                  # a random port, so the real headroom keeps 8460
 cleaner.MIN_KB, cleaner.SMALL_KB, cleaner.BUILD_MIN_KB = 8, 64, 64
 outside = os.path.join(box, "outside")
-real_run = cleaner.run
+spawn = cleaner.run
+
+
+def real_run(command, timeout=None, input=None):
+    """Every program the tests start goes through here. A login code must never be on a command
+    line, where `ps` shows it to every account on the Mac."""
+    assert not any("?k=" in str(part) for part in command), command
+    return spawn(command, timeout, input)
+
+
+cleaner.run = real_run
 # What `ps` shows. Real apps running on this Mac must not change what the tests delete.
 RUNNING = [""]
 cleaner.processes = lambda: RUNNING[0]
+# No test opens a browser tab: the addresses headroom would open are kept here instead.
+OPENED = []
+real_open_page = cleaner.open_page
+cleaner.open_page = OPENED.append
 
 
 def put(*parts, kb=100, root=None):
@@ -83,15 +97,18 @@ class Recorder:
     `answer(command)` gives a recorded command's (returncode, output); `fakes` are fake programs."""
     def __init__(self, returncode=0, stderr="", answer=None, fakes=()):
         self.calls, self.returncode, self.stderr, self.answer, self.fakes = [], returncode, stderr, answer, fakes
+        self.inputs = []        # what each recorded command was given to read
 
-    def __call__(self, command, timeout=None):
+    def __call__(self, command, timeout=None, input=None):
+        assert not any("?k=" in str(part) for part in command), command
         if command[0] in ("/usr/bin/osascript", "/usr/bin/open", "/usr/bin/qlmanage", "/usr/bin/mdls",
                           "/bin/launchctl", "/usr/bin/env") + tuple(self.fakes):
             self.calls.append(command)
+            self.inputs.append(input)
             code, out = self.answer(command) if self.answer else (self.returncode, "")
             return subprocess.CompletedProcess(command, code, out, self.stderr)
         assert command[0] in ("/usr/bin/du", "/bin/ps", "/bin/rm") or command[0].endswith("/git"), command
-        return real_run(command, timeout)
+        return real_run(command, timeout, input)
 
 
 @contextlib.contextmanager
@@ -513,6 +530,28 @@ try:
     out = cleaner.delete(stray)
     assert out["errors"] and os.path.exists(kept_outside), out
 
+    # --- a folder's name can't add a line to what `du` says ------------------------
+    # `du` prints "size<TAB>path" on a line, and a name may hold a line break. These nested folders
+    # spell a second line: a real folder somewhere else, with a made-up size. Rows come from what
+    # du() returns and a delete removes them, so only the paths that were asked about may come back.
+    thesis = os.path.dirname(put("Documents", "thesis", "draft.txt"))
+    clone = os.path.join(cleaner.HOME, "Desktop", "clone")
+    spelled = thesis.lstrip(os.sep).split(os.sep)
+    hostile = os.path.join(clone, "x\n99999\t", *spelled[:-1], spelled[-1] + "\ny", "node_modules")
+    put("dep.js", root=hostile)
+    put("package.json", kb=1, root=os.path.dirname(hostile))
+    assert cleaner.deletable(thesis), "the second lock would let it through, so du() must not offer it"
+    assert thesis not in cleaner.du([hostile]) and set(cleaner.du([hostile, thesis])) == {thesis}
+    assert all(os.path.lexists(p) for p in cleaner.du_children(clone)[0]), "nor does the Disk tab list one"
+    # The walk for build folders doesn't go into such a name in the first place.
+    odd = [os.path.join(cleaner.HOME, "Desktop", name) for name in ("line\nbreak", "carriage\rreturn")]
+    for folder in odd:
+        put("package.json", kb=1, root=folder)
+        put("node_modules", "dep.js", root=folder)
+    assert not any("\n" in folder or "\r" in folder for folder in cleaner.find_build_folders())
+    for folder in odd + [clone, thesis]:
+        shutil.rmtree(folder)
+
     in_use = cleaner.item("apps", "in use", [caches["big"]["paths"][0]], 100,
                           quit=("Quit it first", [re.escape("/Applications/It.app/Contents/MacOS/It")]))
     RUNNING[0] = "/Applications/It.app/Contents/MacOS/It\n"
@@ -910,15 +949,54 @@ try:
         threading.Thread(target=server.serve_forever, daemon=True).start()
     port = v4.server_port
     host = f"headroom.localhost:{port}"
-    cookie = f"headroom={cleaner.TOKEN}"
+    # --- signing in: the session, kept in a file only this account can read ------------------------
+    # Two secrets: the token that rides in the cookie, and the key the page keeps for its own origin.
+    session_file = os.path.join(cleaner.state_dir(), "session.json")
+    assert not os.path.exists(session_file), "nothing makes a session before one is needed"
+    open(session_file + ".tmp", "w").close()        # a leftover that anyone could read
+    token, key = cleaner.session()["token"], cleaner.session()["key"]
+    assert len(token) >= 43 and len(key) >= 43 and token != key, "two secrets"
+    assert (cleaner.session()["token"], cleaner.session()["key"]) == (token, key), "kept"
+    assert os.stat(session_file).st_mode & 0o777 == 0o600, oct(os.stat(session_file).st_mode)
+    made = json.load(open(session_file))["created"]
+    assert cleaner.session(made + 29 * cleaner.DAY)["token"] == token
+    renewed = cleaner.session(made + 31 * cleaner.DAY)
+    assert renewed["token"] != token and renewed["key"] != key, "both are new after 30 days"
+    assert os.stat(session_file).st_mode & 0o777 == 0o600, "and the new file is as private"
+    for broken in ("{", json.dumps({"token": "short", "key": "k" * 43, "created": time.time()}),
+                   json.dumps({"token": "t" * 43, "created": time.time()}), json.dumps(["not", "a", "session"])):
+        with open(session_file, "w") as handle:
+            handle.write(broken)
+        token, earlier = cleaner.session()["token"], token
+        assert token != earlier and json.load(open(session_file))["token"] == token, "an unreadable file is replaced"
+    os.remove(session_file)
+    assert cleaner.session()["token"] != token, "and so is a missing one"
+    # A disk too full to save one: this launch's session goes on working, and is saved once it can be.
+    os.remove(session_file)
+    os.chmod(cleaner.state_dir(), 0o500)
+    try:
+        unsaved = cleaner.session()
+        assert cleaner.session() == unsaved and not os.path.exists(session_file)
+    finally:
+        os.chmod(cleaner.state_dir(), 0o700)
+    assert cleaner.session() == unsaved == json.load(open(session_file))
+    assert os.stat(session_file).st_mode & 0o777 == 0o600
+    token, key = unsaved["token"], unsaved["key"]
+    cookie = f"headroom={token}"
 
-    def call(path, body=None, cookie=cookie, host=host, run=cleaner.RUN, address="127.0.0.1", raw=None, extra=None):
+    def call(path, body=None, cookie=cookie, host=host, run=cleaner.RUN, address="127.0.0.1", raw=None, extra=None,
+             key=key):
         connection = http.client.HTTPConnection(address, port, timeout=30)
-        headers = {"Host": host, **(extra or {})}
+        headers = {"Host": host}
         if cookie:
             headers["Cookie"] = cookie
         if run:
             headers["X-Headroom"] = run
+        if key:
+            headers["X-Headroom-Key"] = key
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        headers.update(extra or {})
         data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
         connection.request("POST" if data is not None else "GET", path, body=data, headers=headers)
         reply = connection.getresponse()
@@ -929,60 +1007,184 @@ try:
         except ValueError:
             return reply.status, text, reply
 
-    status, _, reply = call(f"/?k={cleaner.TOKEN}", cookie=None, run=None)
-    assert status == 303 and reply.getheader("Location") == "/", status
-    assert reply.getheader("Set-Cookie") == f"headroom={cleaner.TOKEN}; Path=/; HttpOnly; SameSite=Strict"
-    status, _, reply = call("/?k=wrong", cookie=None, run=None)
-    assert status == 303 and reply.getheader("Set-Cookie") is None
-    status, page, reply = call("/", cookie=None, run=None)
-    assert status == 200 and cleaner.RUN.encode() in page and b"__RUN__" not in page
-    assert call("/favicon.svg", cookie=None, run=None)[1].startswith(b"<svg")
-    # The tab icons can be cached (Safari shows a letter otherwise); nothing else can.
-    for icon_path in ("/favicon.svg", "/favicon-32.png", "/favicon.ico", "/apple-touch-icon.png"):
-        status, _, reply = call(icon_path, cookie=None, run=None)
-        assert status == 200 and reply.getheader("Cache-Control") == "public, max-age=604800", icon_path
-    assert call("/", cookie=None, run=None)[2].getheader("Cache-Control") == "no-store"
-    assert call("/api/start")[2].getheader("Cache-Control") == "no-store"
-    assert call("/", host="evil.example:80", cookie=None, run=None)[0] == 403, "DNS rebinding gets nothing"
-    # Typing headroom.localhost (or using a bookmark, or the port-80 door's redirect) opens a session;
-    # a link or redirect from another site gets the page, which says to open headroom from Applications.
-    def visit(site, mode="navigate", dest="document", **options):
-        sent = {k: v for k, v in (("Sec-Fetch-Site", site), ("Sec-Fetch-Mode", mode), ("Sec-Fetch-Dest", dest)) if v}
-        return call("/", cookie=options.pop("cookie", None), run=None, extra=sent, **options)
-    status, page, reply = visit("none")
-    assert status == 200 and reply.getheader("Set-Cookie") == cleaner.COOKIE and b"headroom-run" in page
-    for site, mode, dest in (("same-site", "navigate", "document"), ("same-origin", "navigate", "document"),
-                             ("none", "navigate", None)):
-        assert visit(site, mode, dest)[2].getheader("Set-Cookie") == cleaner.COOKIE, (site, mode, dest)
-    for site, mode, dest in (("cross-site", "navigate", "document"), (None, "navigate", "document"),
-                             ("same-site", "cors", "empty"), ("same-site", "no-cors", "image"),
-                             ("same-site", "navigate", "iframe"), ("none", None, None), (None, None, None)):
-        status, _, reply = visit(site, mode, dest)
-        assert status == 200 and reply.getheader("Set-Cookie") is None, (site, mode, dest)
-    assert visit("none", host="evil.example:80")[0] == 403, "the Host check comes first"
-    assert visit("none", cookie=cookie)[2].getheader("Set-Cookie") is None, "already signed in"
-    assert call("/api/start")[0] == 200
+    # The page is the same for everyone on this Mac and holds no secret: this launch's id, the
+    # nonce of its scripts, and whether a link on another site led here. Signed in or not, with a
+    # login code on the address or not, loading it gives nothing away and changes nothing.
+    code = cleaner.login_code()
+    for path, sent_cookie, sent_key in (("/", None, None), ("/", cookie, key), (f"/?k={code}", None, None)):
+        status, page, reply = call(path, cookie=sent_cookie, key=sent_key, run=None)
+        assert status == 200 and cleaner.RUN.encode() in page and b"__RUN__" not in page, path
+        assert token.encode() not in page and key.encode() not in page, "neither half of the session is in the page"
+        assert reply.getheader("Set-Cookie") is None and reply.getheader("Location") is None, path
+    assert code in cleaner.CODES, "loading the address does not spend its code"
+    marked = b'<script nonce="' + cleaner.NONCE.encode() + b'">'
+    assert page.count(marked) == page.count(b"<script") == 2 and b"__NONCE__" not in page
+    policy = reply.getheader("Content-Security-Policy")
+    assert f"script-src 'nonce-{cleaner.NONCE}';" in policy and "script-src 'unsafe-inline'" not in policy, policy
+    assert not re.search(rb"<[^>]+\son\w+\s*=|javascript:", page, re.I), "nothing inline for the policy to stop"
+    assert b'name="headroom-arrived" content=""' in page
+    crossed = call("/", cookie=None, key=None, run=None, extra={"Sec-Fetch-Site": "cross-site"})[1]
+    assert b'name="headroom-arrived" content="cross-site"' in crossed, "the page is told another site's link led here"
+
+    # Signing in is the page's own call: it posts the code from its address and gets both halves
+    # back, the cookie and the origin key. Only headroom's page may ask: not another site's page,
+    # not a form, not anything without this launch's id. A code is good once, for two minutes.
+    def login(code, **options):
+        return call("/api/login", body={"code": code}, **{"cookie": None, "key": None, **options})
+
+    assert 118 < cleaner.CODES[code] - time.time() <= 120
+    for refused in ({"extra": {"Sec-Fetch-Site": "cross-site"}}, {"run": None}, {"host": "evil.example:80"},
+                    {"extra": {"Content-Type": "text/plain"}}, {"extra": {"Content-Type": "application/x-www-form-urlencoded"}}):
+        status, got, reply = login(code, **refused)
+        assert status == 403 and "key" not in got and reply.getheader("Set-Cookie") is None, refused
+    assert login(code, run="0123456789abcdef")[0] == 410, "a tab from an earlier launch"
+    assert code in cleaner.CODES, "a caller that is turned away does not spend the code"
+    status, got, reply = login(code)
+    assert status == 200 and got == {"key": key}, got
+    assert reply.getheader("Set-Cookie") == f"headroom={token}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Strict"
+    status, got, reply = login(code)
+    assert status == 403 and "key" not in got and reply.getheader("Set-Cookie") is None, "a code works once"
+    assert login(code, cookie=cookie, key=key)[0] == 403, "also for a browser that is signed in already"
+    late = cleaner.login_code()
+    cleaner.CODES[late] = time.time() - 1
+    assert login(late)[0] == 403, "and not after two minutes"
+    assert late not in cleaner.CODES and code not in cleaner.CODES
+    for wrong in ("wrong", token, key, "", None, ["a", "list"]):
+        status, got, reply = login(wrong)
+        assert status == 403 and "key" not in got and reply.getheader("Set-Cookie") is None, wrong
+
+    # Every other call needs both halves, and this launch's id. The cookie alone is what a program
+    # listening on another port of headroom.localhost can be sent, so by itself it opens nothing.
+    assert call("/api/start")[0] == 200, "the cookie and the key"
+    assert call("/api/start", key=None)[0] == 403, "the cookie alone"
+    assert call("/api/start", cookie=None)[0] == 403, "the key alone"
+    for sent_cookie, sent_key in ((cookie, "wrong"), (cookie, token), ("headroom=wrong", key), (f"headroom={key}", key),
+                                  (f"headroom={key}", token), (None, None)):
+        assert call("/api/start", cookie=sent_cookie, key=sent_key)[0] == 403, (sent_cookie, sent_key)
+    assert call("/api/delete", body={"ids": ["x"]}, key=None)[0] == 403
+    assert call("/api/delete", body={"ids": ["x"]}, cookie=None)[0] == 403
     assert call("/api/start", host=f"127.0.0.1:{port}")[0] == 200
     assert call("/api/start", host=f"[::1]:{port}", address="::1")[0] == 200, "the ::1 listener answers"
-    assert call("/api/start", cookie=None)[0] == 403, "no cookie"
-    assert call("/api/start", cookie="headroom=wrong")[0] == 403, "wrong cookie"
     assert call("/api/start", host="evil.example:80")[0] == 403, "foreign Host"
     assert call("/api/start", host=f"headroom.localhost:{port + 1}")[0] == 403
     assert call("/api/start", run="0123456789abcdef")[0] == 410, "a tab from an earlier launch"
     assert call("/api/delete", body={"ids": ["x"]}, run=None)[0] == 403, "POST without the custom header"
-    assert call("/api/delete", body={"ids": ["x"]}, cookie=None)[0] == 403
     assert call("/api/delete", body={"ids": ["no-such-row"]})[0] == 404
     assert call("/api/delete", body={"paths": ["/etc/hosts"]})[0] == 400
     assert call("/api/delete", body={"ids": [["not", "a", "string"]]})[0] == 400
     assert call("/api/delete", body={"ids": []})[0] == 400
     assert call("/api/trash", body={"path": "/etc/hosts"})[0] == 400, "paths are never accepted"
     assert call("/api/maintain", body={"id": "rm -rf /"})[0] == 404
+    assert call("/", host="evil.example:80", cookie=None, key=None, run=None)[0] == 403, "DNS rebinding gets nothing"
+
+    # A page that isn't signed in asks for a tab. All it gets is that tab, opened in this account's
+    # own browser on a fresh login code, at most once in 15 seconds: another account on this Mac
+    # can ask too. Another site's page can't, and loading the page opens nothing by itself.
+    def invite(**options):
+        return call("/api/invite", body={}, **{"cookie": None, "key": None, **options})
+
+    def opened(count):
+        for _ in range(100):
+            if len(OPENED) >= count:
+                break
+            time.sleep(0.02)
+        time.sleep(0.1)         # long enough for one too many to show up
+        return len(OPENED) == count
+
+    del OPENED[:]
+    cleaner.OPENED = 0
+    for refused in ({"extra": {"Sec-Fetch-Site": "cross-site"}}, {"run": None}, {"host": "evil.example:80"},
+                    {"extra": {"Content-Type": "text/plain"}}):
+        assert invite(**refused)[0] == 403, refused
+    assert invite(run="0123456789abcdef")[0] == 410
+    for site in ("none", "same-origin", "cross-site", None):
+        assert call("/", cookie=None, key=None, run=None, extra={"Sec-Fetch-Site": site} if site else None)[0] == 200
+    assert opened(0), "none of those opened anything"
+    status, got, reply = invite()
+    assert status == 200 and got == {} and reply.getheader("Set-Cookie") is None, got
+    assert opened(1) and re.match(rf"^http://headroom\.localhost:{port}/\?k=[\w-]+$", OPENED[0]), OPENED
+    for _ in range(5):
+        assert invite()[0] == 200
+    assert opened(1), "one tab in 15 seconds, however often it is asked for"
+    assert login(OPENED[0].split("?k=")[1])[1] == {"key": key}, "the tab it opened signs in"
+    cleaner.OPENED = 0
+    assert invite(host=f"127.0.0.1:{port}")[0] == 200
+    assert opened(2) and OPENED[1].startswith(f"http://127.0.0.1:{port}/?k="), "the tab opens where it was asked for"
+
+    # --- the address headroom opens never sits on a command line ----------------------------------
+    # It carries a login code, and every account on a Mac can read every process's arguments
+    # (`ps`). So it goes to LaunchServices inside this process, or into osascript's input.
+    assert cleaner.launch("x-headroom-selftest://x") == -10814, "LaunchServices was asked: no app opens such an address"
+    url = f"http://headroom.localhost:{port}/?k={cleaner.login_code()}"
+    real_launch, handed = cleaner.launch, []
+    try:
+        cleaner.launch = lambda address: handed.append(address) or 0
+        with recording(Recorder()) as recorder:
+            real_open_page(url)
+        assert handed == [url] and recorder.calls == [], "handed over in this process: no program is started"
+        for failure in (OSError("no such framework"), AttributeError("no such call"), -10814):
+            def launch(address, failure=failure):
+                if isinstance(failure, Exception):
+                    raise failure
+                return failure
+            cleaner.launch = launch
+            with recording(Recorder()) as recorder:
+                real_open_page(url)
+            assert recorder.calls == [["/usr/bin/osascript"]], recorder.calls
+            assert recorder.inputs == [f'open location "{url}"'], recorder.inputs
+        # Only an address of headroom's own shape: nothing that could end the script's quotes.
+        for odd in (url + '" & (do shell script "id") & "', url + "\n", "file:///etc/hosts", "http://headroom.localhost/"):
+            with recording(Recorder()) as recorder:
+                try:
+                    real_open_page(odd)
+                    raise AssertionError(odd)
+                except ValueError:
+                    pass
+            assert recorder.calls == [] and odd not in handed, odd
+        # The whole way through: the page asks, the server opens, and still nothing on a command line.
+        cleaner.OPENED, cleaner.open_page = 0, real_open_page
+        with recording(Recorder()) as recorder:
+            assert invite()[0] == 200
+            for _ in range(100):
+                if recorder.calls:
+                    break
+                time.sleep(0.02)
+        assert recorder.calls == [["/usr/bin/osascript"]] and "?k=" in recorder.inputs[0], recorder.calls
+    finally:
+        cleaner.launch, cleaner.open_page = real_launch, OPENED.append
+
+    # The tab icons can be cached (Safari shows a letter otherwise); nothing else can. A page on
+    # another site gets none of them, so it can't tell from an icon that headroom is here.
+    assert call("/favicon.svg", cookie=None, key=None, run=None)[1].startswith(b"<svg")
+    for icon_path in ("/favicon.svg", "/favicon-32.png", "/favicon.ico", "/apple-touch-icon.png"):
+        status, _, reply = call(icon_path, cookie=None, key=None, run=None)
+        assert status == 200 and reply.getheader("Cache-Control") == "public, max-age=604800", icon_path
+        assert call(icon_path, cookie=None, key=None, run=None, extra={"Sec-Fetch-Site": "same-origin"})[0] == 200, icon_path
+        assert call(icon_path, extra={"Sec-Fetch-Site": "cross-site"})[0] == 404, icon_path
+    assert call("/", run=None)[2].getheader("Cache-Control") == "no-store"
+    assert call("/api/start")[2].getheader("Cache-Control") == "no-store"
+    for path, sent in (("/", cookie), ("/", None), ("/api/start", cookie), ("/api/start", None), ("/favicon.svg", None)):
+        reply = call(path, cookie=sent)[2]
+        assert reply.getheader("X-Content-Type-Options") == "nosniff", path
+        assert reply.getheader("Cross-Origin-Resource-Policy") == "same-origin", path
+    # A POST body is read only for this Mac's page, and only a short one that says how long it is.
+    for length, expected in (("abc", 400), ("-1", 400), (str(cleaner.MAX_BODY + 1), 413)):
+        assert call("/api/ping", raw=b"", extra={"Content-Length": length})[0] == expected, length
+    assert call("/api/ping", raw=b"{}", host="evil.example:80")[0] == 403
+
+    # The page says goodbye as its tab closes, with a beacon: no custom headers, so the launch and
+    # the key go in the body and the cookie comes by itself. All three, or nothing happens.
+    def bye(run=cleaner.RUN, key=key, cookie=cookie):
+        return call("/api/bye", raw=json.dumps({"run": run, "key": key}).encode(), cookie=cookie, run=None, key=None)[0]
+
     before = cleaner.DEADLINE
-    assert call("/api/bye", raw=b"not-this-run", run=None)[0] == 200 and cleaner.DEADLINE >= before
-    call("/api/bye", raw=cleaner.RUN.encode(), cookie=None, run=None)
-    assert cleaner.DEADLINE >= before, "a bye without the cookie is ignored"
-    call("/api/bye", raw=cleaner.RUN.encode(), run=None)
-    assert cleaner.DEADLINE < before, "the page's own bye shortens the wait"
+    for missing in ({"run": "not-this-run"}, {"run": None}, {"key": "wrong"}, {"key": None}, {"key": token},
+                    {"cookie": None}, {"cookie": "headroom=wrong"}):
+        assert bye(**missing) == 200 and cleaner.DEADLINE >= before, missing
+    assert call("/api/bye", raw=cleaner.RUN.encode(), run=None, key=None)[0] == 200 and cleaner.DEADLINE >= before
+    for body in ({}, {"run": cleaner.RUN}, {"key": key}):       # the rest in headers, where a beacon has none
+        assert call("/api/bye", raw=json.dumps(body).encode())[0] == 200 and cleaner.DEADLINE >= before, body
+    assert bye() == 200 and cleaner.DEADLINE < before, "the page's own bye shortens the wait"
     cleaner.DEADLINE = time.time() + cleaner.IDLE
 
     status, found = call("/api/scan?source=caches")[:2]
@@ -1101,7 +1303,8 @@ try:
     assert cleaner.inherited() is None, "without the variable, headroom binds its own"
 
     # The whole server started the way the launcher starts it: handed sockets, told not to open
-    # a browser. It names the address on its first line and answers on both sockets.
+    # a browser. It names the address on its first line and answers on both sockets. Its home is
+    # the throwaway one too, so the session it hands out is this test's, never the real one.
     held = [socket.socket(socket.AF_INET), socket.socket(socket.AF_INET6)]
     held[0].bind(("127.0.0.1", 0))
     held[1].bind(("::1", held[0].getsockname()[1]))
@@ -1110,17 +1313,29 @@ try:
     port = held[0].getsockname()[1]
     fds = [sock.fileno() for sock in held]
     child = subprocess.Popen([sys.executable, cleaner.__file__, "--no-open"], stdout=subprocess.PIPE, text=True,
-                             pass_fds=fds, env={**os.environ, "HEADROOM_LISTEN_FDS": ",".join(map(str, fds))})
+                             pass_fds=fds, env={**os.environ, "HOME": cleaner.HOME,
+                                                "HEADROOM_LISTEN_FDS": ",".join(map(str, fds))})
     try:
         line = child.stdout.readline()
         assert re.match(rf"^headroom is open at http://headroom\.localhost:{port}/\?k=[\w-]+$", line.strip()), line
+        assert token not in line and key not in line, "the address carries a login code, never the session"
         for sock in held:
             sock.close()                    # only the child holds them now
-        for address in ("127.0.0.1", "::1"):
+        name, code = f"headroom.localhost:{port}", line.strip().split("?k=")[1]
+        for address, expected in (("127.0.0.1", 200), ("::1", 403)):       # the code works once, on either socket
             connection = http.client.HTTPConnection(address, port, timeout=30)
-            connection.request("GET", "/" + line.strip().split("/", 3)[3], headers={"Host": f"headroom.localhost:{port}"})
+            connection.request("GET", f"/?k={code}", headers={"Host": name})
+            shell = connection.getresponse()
+            run_id = re.search(r'name="headroom-run" content="(\w+)"', shell.read().decode()).group(1)
+            assert shell.status == 200 and shell.getheader("Set-Cookie") is None, address
+            connection = http.client.HTTPConnection(address, port, timeout=30)
+            connection.request("POST", "/api/login", body=json.dumps({"code": code}),
+                               headers={"Host": name, "X-Headroom": run_id, "Content-Type": "application/json"})
             reply = connection.getresponse()
-            assert reply.status == 303 and reply.getheader("Set-Cookie", "").startswith("headroom="), address
+            got = json.loads(reply.read())
+            assert reply.status == expected, (address, reply.status)
+            if expected == 200:
+                assert got == {"key": key} and reply.getheader("Set-Cookie").startswith(f"headroom={token};")
             connection.close()
     finally:
         child.terminate()

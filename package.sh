@@ -10,11 +10,29 @@ cd "$(dirname "$0")"
 here=$(pwd)
 py=${PY:-/Library/Frameworks/Python.framework/Versions/3.11/bin/python3}
 version=$(sed -n 's/^VERSION = "\([^"]*\)"/\1/p' cleaner.py)
+sign_id=${SIGN_ID:-IPS Local Apps}
 
-[ -x .venv-build/bin/pyinstaller ] || {
-  "$py" -m venv .venv-build
-  .venv-build/bin/pip install --quiet "pyinstaller>=6,<7"
+# A release is what's in git: nothing uncommitted ends up in a zip.
+[ -z "$(git status --porcelain)" ] || {
+  echo "There are uncommitted changes. Commit or stash them, then build." >&2
+  exit 1
 }
+# Same certificate every release, so friends' Macs keep headroom's permissions across updates.
+# SIGN_ID picks another one (a Developer ID later). If it isn't in the keychain the build stops
+# here, not after quietly signing ad-hoc; ALLOW_ADHOC=1 builds with a throwaway signature anyway.
+security find-identity -p codesigning | grep -qF -e "\"$sign_id\"" -e ") $sign_id " || {
+  [ "${ALLOW_ADHOC:-}" = 1 ] || {
+    echo "No \"$sign_id\" certificate in the keychain. Set SIGN_ID, or ALLOW_ADHOC=1 to sign ad-hoc." >&2
+    exit 1
+  }
+  sign_id=-
+}
+
+# A new build environment every time, from requirements-build.txt: exact versions, and pip
+# refuses any download that isn't the file hashed there.
+rm -rf .venv-build
+"$py" -m venv .venv-build
+.venv-build/bin/pip install --quiet --require-hashes --only-binary :all: -r requirements-build.txt
 
 build() {
   arch=$1 zip=$2
@@ -29,10 +47,7 @@ build() {
   launcher/build.sh "$arch" "$app/Contents/MacOS/headroom-app"
   /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable headroom-app" \
     -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
-  # Same certificate every release, so friends' Macs keep headroom's permissions across updates.
-  # SIGN_ID picks another one (a Developer ID later); no certificate → ad-hoc.
-  codesign --force --deep --sign "${SIGN_ID:-IPS Local Apps}" "$app" 2>/dev/null \
-    || codesign --force --deep --sign - "$app"
+  codesign --force --deep --sign "$sign_id" "$app"     # checked at the top; a failure here stops the build
   rm -f "dist/$zip"
   ditto -c -k --keepParent "$app" "dist/$zip"
   echo "Made: dist/$zip ($(du -h "dist/$zip" | cut -f1))"
@@ -42,3 +57,6 @@ mkdir -p dist
 rm -rf dist/headroom.app dist/headroom.zip     # the old universal build
 build arm64 headroom-apple-silicon.zip
 build x86_64 headroom-intel.zip
+# Goes on the Releases page beside the zips, so a download can be checked against it.
+(cd dist && shasum -a 256 headroom-apple-silicon.zip headroom-intel.zip > SHA256SUMS)
+echo "Made: dist/SHA256SUMS"

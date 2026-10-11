@@ -21,6 +21,14 @@ You don't need Python or anything else, just macOS 12 or newer.
    under Assets:
    - `headroom-apple-silicon.zip` for Apple Silicon
    - `headroom-intel.zip` for Intel
+
+   If you want to check the download first, get `SHA256SUMS` from the same place and run this
+   in Terminal, in the folder with both files. It should say `OK`. (Safari unzips by itself and
+   moves the zip to the Trash, so drag the zip back out first.)
+
+   ```sh
+   shasum -a 256 -c SHA256SUMS --ignore-missing
+   ```
 3. **Unzip it.** Safari does this by itself. Otherwise double-click the zip in Downloads. You get
    `headroom.app`.
 4. **Move it to Applications.** Drag `headroom.app` onto Applications in the Finder sidebar. Don't
@@ -172,8 +180,20 @@ nothing of it while qBittorrent is open.
 I was careful here because it deletes things. The page never sends file paths to the app, only
 the ids of rows it was shown, and the app only deletes what its own scan found. On top of that
 it refuses anything outside your home folder or reached through a symlink, and only moves apps
-to the Trash, never deletes them. It only listens on this Mac (`127.0.0.1` and `::1`), and the
-page needs a cookie made at launch, so no website can talk to it.
+to the Trash, never deletes them.
+
+It only listens on this Mac (`127.0.0.1` and `::1`), and the page only works in a browser
+headroom has signed in, so no website can talk to it. Being signed in takes two things: a
+cookie, and a key the page keeps in the browser's storage for its exact address. A cookie alone
+isn't tied to a port on localhost, so another program on your Mac could be sent it. The key
+never leaves headroom's own page.
+
+The first time, headroom signs your browser in by opening a tab itself. If you typed the
+address, you'll see a second tab open and the first one say you can close it. After that the
+browser stays signed in for 30 days, so typing `headroom.localhost` just works. Only your default
+browser gets signed in this way.
+
+Found a security problem? [SECURITY.md](SECURITY.md) says how to tell me privately.
 
 ## Building it yourself
 
@@ -192,6 +212,8 @@ Without it, the app gets a throwaway signature and macOS asks again after every 
 `python3 test_cleaner.py` runs the tests. They use a fake home folder and stand in for Finder,
 so nothing real gets deleted or moved.
 
-`./package.sh` makes the two zips for the Releases page. It needs the python.org Python 3.11
-and downloads PyInstaller the first time. I build Apple Silicon and Intel separately on purpose:
-a universal app made macOS warn that it "will not open in macOS 28".
+`./package.sh` makes the two zips for the Releases page, and `SHA256SUMS` to upload beside them.
+It needs the python.org Python 3.11, a clean git tree and my certificate in the keychain
+(`ALLOW_ADHOC=1` builds without it). PyInstaller and what it needs are pinned in
+`requirements-build.txt`, with hashes, and installed fresh for every build. I build Apple Silicon
+and Intel separately on purpose: a universal app made macOS warn that it "will not open in macOS 28".

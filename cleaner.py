@@ -33,13 +33,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 
-def run(command, timeout=None):
-    """Start a program and collect what it prints.
+def run(command, timeout=None, input=None):
+    """Start a program and collect what it prints. `input` is text for it to read.
 
     close_fds=False lets Python use posix_spawn rather than fork. A Mac with a full disk runs
     out of memory to fork with, which is exactly when this tool gets opened, and spawn still works.
     """
-    return subprocess.run(command, capture_output=True, text=True, close_fds=False, timeout=timeout)
+    return subprocess.run(command, capture_output=True, text=True, close_fds=False, timeout=timeout, input=input)
 
 
 HOME = os.path.realpath(os.path.expanduser("~"))
@@ -48,17 +48,18 @@ TMP = os.path.realpath(run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]).stdout.
 HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 FROZEN = getattr(sys, "frozen", False)
 
-# The page lives at http://headroom.localhost:8460. The address opened first carries TOKEN once
-# (?k=...), which becomes a cookie; RUN marks this launch, so a tab left over from an earlier
-# one is turned away instead of acting on this one.
+# The page lives at http://headroom.localhost:8460. Anyone on this Mac may load it: it holds no
+# secret. What it may do is decided call by call, by a session the browser gets from the address
+# headroom itself opens, which carries a login code once (?k=...). "Signing in" below has it all.
+# RUN marks this launch, so a tab left over from an earlier one is turned away instead of acting
+# on this one; NONCE marks the page's own scripts, the only ones the browser is told to run.
 NAME = "headroom.localhost"
 PORTS = list(range(8460, 8480))
-TOKEN = secrets.token_urlsafe(24)
 RUN = secrets.token_hex(8)
-COOKIE = f"headroom={TOKEN}; Path=/; HttpOnly; SameSite=Strict"
+NONCE = secrets.token_urlsafe(16)
 
 # install.py and package.sh read the version from here. A newer release on GitHub shows up in the app.
-VERSION = "1.4"
+VERSION = "1.5"
 RELEASES = "https://github.com/ips610/headroom/releases"
 
 APPLICATIONS = "/Applications"
@@ -221,11 +222,15 @@ def children(folder, skip=()):
 def _du(paths):
     sizes = {}
     for start in range(0, len(paths), 400):
+        batch = paths[start:start + 400]
+        asked = set(batch)
         with DU_SLOTS:
-            done = run(["/usr/bin/du", "-sk", "--"] + paths[start:start + 400])
+            done = run(["/usr/bin/du", "-sk", "--"] + batch)
         for line in done.stdout.splitlines():
             kb, _, path = line.partition("\t")
-            if kb.strip().isdigit():
+            # Only what was asked about. A folder name can hold a line break and a made-up
+            # "size<TAB>path" after it, and callers delete what comes back from here.
+            if kb.strip().isdigit() and path in asked:
                 sizes[path] = int(kb)
     return sizes
 
@@ -773,6 +778,8 @@ def scan_big():
 def find_build_folders():
     found = []
     for folder, dirs, files in os.walk(HOME):
+        # A name with a line break in it is nobody's project, and would read as two lines of `du`.
+        dirs[:] = [d for d in dirs if "\n" not in d and "\r" not in d]
         depth = folder[len(HOME):].count(os.sep)
         if depth == 0:
             dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_HOME]
@@ -1565,16 +1572,26 @@ def load_state(name, default):
         return default
 
 
-def save_state(name, data):
-    """Write a small JSON file in headroom's folder, all at once (a crash never leaves half a file)."""
+def only_mine(path, flags):
+    """An opener for open(): a new file that only this account can read, from the moment it exists."""
+    return os.open(path, flags | os.O_EXCL, 0o600)
+
+
+def save_state(name, data, private=False):
+    """Write a small JSON file in headroom's folder, all at once (a crash never leaves half a file).
+    `private` is for a secret: the file is never readable by another account, not even briefly.
+    True when it was saved."""
     path = os.path.join(state_dir(), name)
     try:
         os.makedirs(state_dir(), exist_ok=True)
-        with open(path + ".tmp", "w") as handle:
+        if private and os.path.lexists(path + ".tmp"):
+            os.remove(path + ".tmp")        # a leftover would keep the permissions it was made with
+        with open(path + ".tmp", "w", opener=only_mine if private else None) as handle:
             json.dump(data, handle)
         os.replace(path + ".tmp", path)
     except OSError:
-        pass
+        return False
+    return True
 
 
 def history_file():
@@ -1912,12 +1929,13 @@ def list_apps():
         APPS[aid] = app
         when = used.get(app["path"], "").strip()
         try:
-            last = ago(calendar.timegm(time.strptime(when[:19], "%Y-%m-%d %H:%M:%S")))   # mdls says +0000
+            opened = calendar.timegm(time.strptime(when[:19], "%Y-%m-%d %H:%M:%S"))   # mdls says +0000
+            last, last_on = ago(opened), time.strftime("%-d %b %Y", time.localtime(opened))
         except ValueError:
-            last = ""
+            last = last_on = ""
         out.append({
             "id": aid, "name": app["name"], "version": app["version"], "kb": sizes.get(app["path"], 0),
-            "used": last, "password": not os.access(app["path"], os.W_OK),
+            "used": last, "used_on": last_on, "password": not os.access(app["path"], os.W_OK),
             "blocked": f"Quit {app['name']} first" if os.path.realpath(app["exe"]) in running else "",
             "leftovers": [{"name": tilde(p), "kb": sizes.get(p, 0)} for p in app["leftovers"]],
         })
@@ -1958,13 +1976,15 @@ SIZES_FOR = 10 * 60
 def du_children(folder):
     """Each thing a folder holds with its size, the total, and the paths du was not let into."""
     done = run(["/usr/bin/du", "-k", "-d", "1", "--", folder])     # folders; macOS du can't add -a here
+    inside = children(folder)
+    known = {folder, *inside}
     sizes = {}
     for line in done.stdout.splitlines():
         kb, _, path = line.partition("\t")
-        if kb.strip().isdigit():
+        if kb.strip().isdigit() and path in known:                  # as in _du: no made-up lines
             sizes[path] = int(kb)
     total = sizes.pop(folder, None)
-    for path in children(folder):                                   # files, from their own blocks
+    for path in inside:                                             # files, from their own blocks
         try:
             info = os.lstat(path)
         except OSError:
@@ -2622,6 +2642,120 @@ def payload(body):
     return data if isinstance(data, dict) else {}
 
 
+# --- signing in ---------------------------------------------------------------------------------------
+#
+# Anything on this Mac can connect to the page's port, another account included, so asking is
+# never enough. A session has two halves, and every call needs both:
+#   - a cookie that holds the session token. The browser keeps it for the name headroom.localhost;
+#   - the origin key, which the page keeps in its own storage (localStorage) and sends as a header.
+# A cookie alone isn't tied to a port: another program listening on a different port of the same
+# name gets sent it. The page's storage is tied to the port, so that program never sees the key.
+# Both are kept between launches (headroom quits when its tab closes, and typing the address next
+# week should still just work) and replaced after 30 days.
+# A browser gets them from a login code in the address headroom itself opens: good once, for two
+# minutes. A page that isn't signed in asks for such a tab, and says so.
+
+SESSION_FOR = 30 * DAY
+CODE_FOR = 120
+OPEN_EVERY = 15             # seconds between the tabs opened for pages that aren't signed in
+MAX_BODY = 1024 * 1024      # the page posts a few ids; nothing it sends comes near this
+SESSION = {}                # {token, key, created} while it could not be saved to session.json
+CODES = {}                  # login code -> when it stops working
+OPENED = 0.0                # when a tab was last opened for a page that isn't signed in
+SAFE_URL = re.compile(r"http://[\w.\[\]:-]+/\?k=[\w-]+")     # the only kind of address headroom opens
+
+
+def session(now=None):
+    """Both halves of the session, {token, key, created}, from session.json, which only this
+    account can read. New ones are made when that file is missing, unreadable or 30 days old."""
+    now = time.time() if now is None else now
+
+    def good(saved):
+        return (isinstance(saved, dict) and all(isinstance(saved.get(k), str) and len(saved[k]) >= 32 for k in ("token", "key"))
+                and isinstance(saved.get("created"), (int, float)) and 0 <= now - saved["created"] < SESSION_FOR)
+
+    with STATE_LOCK:
+        saved = load_state("session.json", None)
+        if good(saved):
+            SESSION.clear()
+        else:
+            # New ones, unless the last ones could not be saved (a full disk, which is when headroom
+            # gets opened): those are tried again, so the browser stays signed in while space is freed.
+            saved = dict(SESSION) if good(SESSION) else {
+                "token": secrets.token_urlsafe(32), "key": secrets.token_urlsafe(32), "created": now}
+            SESSION.clear()
+            if not save_state("session.json", saved, private=True):
+                SESSION.update(saved)
+        return saved
+
+
+def cookie():
+    return f"headroom={session()['token']}; Path=/; Max-Age={SESSION_FOR}; HttpOnly; SameSite=Strict"
+
+
+def login_code():
+    """A code for an address headroom opens: swapped for the session once, within two minutes."""
+    code = secrets.token_urlsafe(24)
+    with LOCK:
+        for old in [c for c, until in CODES.items() if until < time.time()]:
+            del CODES[old]
+        CODES[code] = time.time() + CODE_FOR
+    return code
+
+
+def redeem(sent):
+    """True for a login code that is still good. It stops working here, used or expired."""
+    with LOCK:
+        code = next((c for c in CODES if secrets.compare_digest(c.encode(), sent.encode())), None)
+        return code is not None and CODES.pop(code) >= time.time()
+
+
+def launch(url):
+    """Hand an address to LaunchServices from inside this process, which is what `open` does
+    with one. macOS's answer: 0 when an app took it, -10814 when no app opens such addresses."""
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    ls = ctypes.CDLL("/System/Library/Frameworks/CoreServices.framework/CoreServices")
+    cf.CFURLCreateWithBytes.restype = ctypes.c_void_p
+    cf.CFURLCreateWithBytes.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32, ctypes.c_void_p]
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+    ls.LSOpenCFURLRef.restype = ctypes.c_int32
+    ls.LSOpenCFURLRef.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    raw = url.encode()
+    made = cf.CFURLCreateWithBytes(None, raw, len(raw), 0x08000100, None)      # 0x08000100: UTF-8
+    if not made:
+        raise OSError("not an address")
+    try:
+        return ls.LSOpenCFURLRef(made, None)
+    finally:
+        cf.CFRelease(made)
+
+
+def open_page(url):
+    """Open headroom's page in the default browser. The address carries a login code, and every
+    account on a Mac can read every process's arguments (`ps`), so it never goes on a command
+    line: LaunchServices takes it inside this process, or failing that osascript reads it from
+    its input. Only an address of headroom's own shape, so nothing in it can end the script's quotes."""
+    if not SAFE_URL.fullmatch(url):
+        raise ValueError(f"not an address headroom opens: {url!r}")
+    try:
+        if launch(url) == 0:
+            return
+    except (OSError, AttributeError):       # the frameworks, or the calls in them, are not there
+        pass
+    run(["/usr/bin/osascript"], timeout=60, input=f'open location "{url}"')
+
+
+def invite(host):
+    """Open a signed-in tab for a page that isn't signed in. At most one in 15 seconds: another
+    account on this Mac can ask too, and must not get to fill the screen."""
+    global OPENED
+    with LOCK:
+        if time.time() - OPENED < OPEN_EVERY:
+            return
+        OPENED = time.time()
+    threading.Thread(target=open_page, args=(f"http://{host}/?k={login_code()}",), daemon=True).start()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -2634,8 +2768,10 @@ class Handler(BaseHTTPRequestHandler):
         headers = dict(headers or {})
         self.send_header("Cache-Control", headers.pop("Cache-Control", "no-store"))
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")     # no other site may embed a reply
         self.send_header("Content-Security-Policy",
-                         "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+                         f"default-src 'none'; script-src 'nonce-{NONCE}'; style-src 'unsafe-inline'; "
                          "img-src 'self'; connect-src 'self'; frame-ancestors 'none'")
         for key, value in headers.items():
             self.send_header(key, value)
@@ -2647,36 +2783,46 @@ class Handler(BaseHTTPRequestHandler):
         port = self.server.server_port
         return self.headers.get("Host") in (f"{NAME}:{port}", f"127.0.0.1:{port}", f"[::1]:{port}")
 
-    def signed_in(self):
-        """The cookie the first address set. Other sites can't send it: SameSite=Strict."""
+    def signed_in(self, key):
+        """Both halves of the session: the cookie (other sites can't send it: SameSite=Strict)
+        and the origin key the page sends with it. Either one alone is nothing."""
         jar = http.cookies.SimpleCookie()
         try:
             jar.load(self.headers.get("Cookie", ""))
         except http.cookies.CookieError:
             return False
-        cookie = jar.get("headroom")
-        return cookie is not None and secrets.compare_digest(cookie.value.encode(), TOKEN.encode())
+        sent, mine = jar.get("headroom"), session()
+        return (sent is not None and isinstance(key, str)
+                and secrets.compare_digest(sent.value.encode(), mine["token"].encode())
+                & secrets.compare_digest(key.encode(), mine["key"].encode()))
 
-    def typed(self):
-        """True for the person opening headroom themselves: a top-level navigation the browser
-        says no other site started. Typed or bookmarked is `none`; arriving through the port-80
-        door at http://headroom.localhost/ is `same-site`. A link or redirect from a website says
-        cross-site, and a browser too old to say anything gets no session either."""
-        dest, mode = self.headers.get("Sec-Fetch-Dest"), self.headers.get("Sec-Fetch-Mode")
-        navigating = dest == "document" or (dest is None and mode == "navigate")
-        return navigating and self.headers.get("Sec-Fetch-Site") in ("none", "same-origin", "same-site")
+    def this_launch(self):
+        """The run id header: the page of this launch is asking. A tab from an earlier launch gets
+        410 and says headroom closed; no header at all gets 403. False when it replied."""
+        sent = self.headers.get("X-Headroom")
+        if not sent:
+            self.reply(403, {"error": "forbidden"})
+        elif not secrets.compare_digest(sent.encode(), RUN.encode()):
+            self.reply(410, {"error": "This window is from an earlier run of headroom."})
+        return bool(sent) and secrets.compare_digest(sent.encode(), RUN.encode())
 
     def allowed(self):
-        """Only this launch's page may use the API: the right Host, the cookie, and a header no
-        cross-site form can send. A tab from an earlier launch gets 410 and says headroom closed."""
-        sent = self.headers.get("X-Headroom")
-        if not (self.local() and self.signed_in() and sent):
+        """Only this launch's signed-in page may use the API: the right Host, both halves of the
+        session, and a header no cross-site form can send."""
+        if not (self.local() and self.signed_in(self.headers.get("X-Headroom-Key"))):
             self.reply(403, {"error": "forbidden"})
             return False
-        if not secrets.compare_digest(sent.encode(), RUN.encode()):
-            self.reply(410, {"error": "This window is from an earlier run of headroom."})
+        return self.this_launch()
+
+    def own_page(self):
+        """For the two calls a page makes before it is signed in: only headroom's own page may
+        make them. The browser says when another site's page is asking, and a JSON body with a
+        custom header is something no form or link on another site can send. False when it replied."""
+        json_sent = self.headers.get("Content-Type", "").split(";")[0].strip().lower() == "application/json"
+        if self.headers.get("Sec-Fetch-Site") == "cross-site" or not json_sent:
+            self.reply(403, {"error": "forbidden"})
             return False
-        return True
+        return self.this_launch()
 
     def handle_one_request(self):
         global BUSY
@@ -2694,24 +2840,25 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(url.query)
         if url.path == "/" and self.local():
             DEADLINE = time.time() + IDLE
-            if url.query:
-                # The address headroom opened: swap the key for a cookie and show a clean URL.
-                headers = {"Location": "/"}
-                if secrets.compare_digest(query.get("k", [""])[0].encode(), TOKEN.encode()):
-                    headers["Set-Cookie"] = COOKIE
-                return self.reply(303, b"", "text/plain", headers)
-            headers = {}
-            if not self.signed_in() and self.typed():
-                headers["Set-Cookie"] = COOKIE
+            # The page, the same for everyone: it holds this launch's run id and script nonce and
+            # no secret. Signing in is the page's own business (see "Signing in"), with or without
+            # ?k=... on the address. It is told one thing: whether a link on another site led
+            # here, because such a visit must not get headroom to open tabs.
+            arrived = b"cross-site" if self.headers.get("Sec-Fetch-Site") == "cross-site" else b""
             with open(os.path.join(HERE, "ui.html"), "rb") as page:
-                return self.reply(200, page.read().replace(b"__RUN__", RUN.encode()), "text/html; charset=utf-8",
-                                  headers)
-        if url.path == "/favicon.svg" and self.local():
-            return self.reply(200, ICON.encode(), "image/svg+xml", ICON_CACHE)
+                html = (page.read().replace(b"__RUN__", RUN.encode()).replace(b"__NONCE__", NONCE.encode())
+                        .replace(b"__ARRIVED__", arrived))
+            return self.reply(200, html, "text/html; charset=utf-8")
         # Safari's tab bar skips SVG icons and shows a letter instead, so offer PNGs too.
         pngs = {"/favicon-32.png": "favicon-32.png", "/favicon.ico": "favicon-32.png",
                 "/apple-touch-icon.png": "apple-touch-icon.png"}
-        if url.path in pngs and self.local():
+        if (url.path == "/favicon.svg" or url.path in pngs) and self.local():
+            if self.headers.get("Sec-Fetch-Site") == "cross-site":
+                # Another site's page is asking. It must not learn headroom is here from an icon
+                # that loads; the browser asks for the tab icons from headroom's own page.
+                return self.reply(404, b"", "text/plain")
+            if url.path == "/favicon.svg":
+                return self.reply(200, ICON.encode(), "image/svg+xml", ICON_CACHE)
             try:
                 with open(os.path.join(HERE, pngs[url.path]), "rb") as icon:
                     return self.reply(200, icon.read(), "image/png", ICON_CACHE)
@@ -2768,17 +2915,40 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global DEADLINE
-        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
-        if self.path == "/api/bye" and self.local() and self.signed_in():
-            # Sent as the tab closes, where a custom header is not possible: the body names the
-            # launch instead. A reload sends it too, so wait a moment for the page to come back.
-            if secrets.compare_digest(body, RUN.encode()):
+        # Nothing is read from a caller the Host check turns away, and never more than a small
+        # body: a length below zero would otherwise mean "read until the caller hangs up".
+        if not self.local():
+            return self.reply(403, {"error": "forbidden"})
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if not 0 <= length <= MAX_BODY:
+            return self.reply(400 if length < 0 else 413, {"error": "headroom reads a short JSON body, with its length."})
+        data = payload(self.rfile.read(length))
+        if self.path == "/api/bye":
+            # Sent as the tab closes, where a custom header is not possible: the body carries the
+            # launch and the origin key instead, and the cookie comes along by itself. All three,
+            # or nothing happens. A reload sends it too, so wait a moment for the page to come back.
+            run_id = data.get("run")
+            if (self.signed_in(data.get("key")) and isinstance(run_id, str)
+                    and secrets.compare_digest(run_id.encode(), RUN.encode())):
                 DEADLINE = time.time() + 4
             return self.reply(200, {})
+        if self.path in ("/api/login", "/api/invite"):
+            if not self.own_page():
+                return
+            if self.path == "/api/invite":
+                invite(self.headers.get("Host"))
+                return self.reply(200, {})
+            code = data.get("code")
+            if not (isinstance(code, str) and redeem(code)):
+                return self.reply(403, {"error": "That login code has been used, or is too old."})
+            DEADLINE = time.time() + IDLE
+            return self.reply(200, {"key": session()["key"]}, headers={"Set-Cookie": cookie()})
         if not self.allowed():
             return
         DEADLINE = time.time() + IDLE
-        data = payload(body)
         wanted = data.get("id") if isinstance(data.get("id"), str) else None
         if self.path == "/api/delete":
             wanted = data.get("ids")
@@ -2931,15 +3101,16 @@ def main():
                        file_actions=[(os.POSIX_SPAWN_DUP2, log, 1), (os.POSIX_SPAWN_DUP2, log, 2)])
         return
     servers = inherited() or [server for server in listen() if server]
-    ipv6 = any(server.address_family == socket.AF_INET6 for server in servers)
-    url = f"http://{NAME if ipv6 else '127.0.0.1'}:{servers[0].server_port}/?k={TOKEN}"
+    # Always by name, also when only 127.0.0.1 could be bound: macOS gives the name both loopback
+    # addresses, and a cookie for the bare address would go to every local server on any port.
+    url = f"http://{NAME}:{servers[0].server_port}/?k={login_code()}"
     print("headroom is open at", url, flush=True)
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=sync_watch, daemon=True).start()     # reminders are on unless turned off
     for server in servers[1:]:
         threading.Thread(target=server.serve_forever, daemon=True).start()
     if "--no-open" not in sys.argv:
-        run(["/usr/bin/open", url])
+        open_page(url)
     try:
         servers[0].serve_forever()
     except KeyboardInterrupt:
