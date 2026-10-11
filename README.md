@@ -37,6 +37,15 @@ list before anything goes.
 headroom has a Dock icon while it runs. Click it to bring the page back, and right-click it →
 Quit (or ⌘Q) to stop headroom. Closing the tab stops it too.
 
+You can also just type `headroom.localhost:8460` in your browser, even when headroom is closed,
+and it starts. macOS keeps that address free for it, so nothing actually runs until you visit.
+If you ever want that gone:
+
+```sh
+launchctl bootout gui/$(id -u)/local.headroom.door
+rm ~/Library/LaunchAgents/local.headroom.door.plist
+```
+
 The first scan may ask for access to Desktop, Documents and Downloads. That's how it finds
 `node_modules` and build folders in your projects.
 
