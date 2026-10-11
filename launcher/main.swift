@@ -172,11 +172,14 @@ enum Door {
     static let request = NSHomeDirectory() + "/Library/Application Support/headroom/open-page"
     static var domain: String { "gui/\(getuid())" }
 
-    // Writes and loads the agent for wherever this app now lives. Skipped for copies macOS runs
-    // from a temporary place (App Translocation, a mounted disk image), whose path will not last.
+    // Writes and loads the agent for wherever this app now lives, but only for a copy installed
+    // in Applications. A copy run from Downloads, a build folder, a disk image or App
+    // Translocation must not point the agents at a path that won't last.
     static func install() -> Bool {
-        let program = Bundle.main.executablePath ?? CommandLine.arguments[0]
-        if program.contains("/AppTranslocation/") || program.hasPrefix("/Volumes/") {
+        let program = (Bundle.main.executablePath ?? CommandLine.arguments[0] as NSString as String)
+        let real = (program as NSString).resolvingSymlinksInPath
+        let installed = real.hasPrefix("/Applications/") || real.hasPrefix(NSHomeDirectory() + "/Applications/")
+        if !installed || real.contains("/AppTranslocation/") {
             return false
         }
         PortDoor.install(program: program)

@@ -2381,11 +2381,14 @@ def settings():
 
 def launcher_program():
     """The app's own launcher, which can post notifications. None when headroom isn't running
-    from an app (./run.sh, the tests): then reminders are left alone."""
+    from an installed app (./run.sh, the tests, a build folder, a copy still in Downloads):
+    then reminders are left alone, so a stray copy can't point the agent at itself."""
+    installed = ("/Applications/", home("Applications") + os.sep)
     for candidate in (os.path.join(HERE, "..", "MacOS", "headroom-app"),
                       os.path.join(os.path.dirname(sys.executable), "headroom-app")):
         if os.access(candidate, os.X_OK):
-            return os.path.realpath(candidate)
+            program = os.path.realpath(candidate)
+            return program if program.startswith(installed) else None
     return None
 
 

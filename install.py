@@ -31,7 +31,7 @@ INFO = {
     "CFBundleIdentifier": "local.headroom",
     "CFBundleExecutable": "headroom",
     "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "1.2",
+    "CFBundleShortVersionString": "1.3",
     "CFBundleIconFile": "icon",
 }
 
