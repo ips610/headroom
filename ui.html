@@ -33,8 +33,8 @@
     --c-trash: #d95926;
     --c-apps: #3987e5;
     --c-temp: #199e70;
-    --c-installers: #e66767;
-    --c-dev: #9085e9;
+    --c-installers: #dc4b4b;     /* Light; Dark uses #e66767 */
+    --c-dev: #7a6be0;            /* Light; Dark uses #9085e9 */
     --c-builds: #d55181;
     --c-leftovers: #008300;
     --c-big: #c98500;
@@ -52,6 +52,26 @@
     --warn-line: #e3a565;
     --danger: #c93a2b;
     --focus: #0f4a34;
+    /* The header band, the result card and the closed screen follow the look: off-white with ink
+       and deep green in Light, ink with mint in Dark. The floating pill stays dark in both. */
+    --band: #f2f3ef;
+    --band-text: #0a0a0a;
+    --band-text-2: #4a4f4a;
+    --band-accent: #16704a;
+    --band-strong: #0f4a34;
+    --band-line: #dcdfd9;
+    --band-chip: #0a0a0a0f;
+    --band-ghost: #0a0a0a38;
+    --tick-used: #a3a7a1;
+    --tick-free: #dcdfd9;
+    --hero-button: #0f4a34;
+    --hero-button-text: #ffffff;
+    --result: #e4efe8;
+    --result-empty: #eceeea;
+    --result-text: #0a0a0a;
+    --result-text-2: #3d443e;
+    --result-accent: #16704a;
+    --result-line: #0a0a0a1f;
     --f-display: "Inter Tight", "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
     --f-body: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
     --f-mono: "JetBrains Mono", "JetBrainsMono Nerd Font Mono", "JetBrainsMono Nerd Font", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -75,6 +95,26 @@
       --warn-line: #8a5a2b;
       --danger: #e0533f;
       --focus: #7be0a8;
+      --band: #0a0a0a;
+      --band-text: #f3f4f1;
+      --band-text-2: #a9ada7;
+      --band-accent: #9fd1b6;
+      --band-strong: #7be0a8;
+      --band-line: #2a2c2a;
+      --band-chip: #ffffff17;
+      --band-ghost: #ffffff3d;
+      --tick-used: #3d413d;
+      --tick-free: #232523;
+      --hero-button: #7be0a8;
+      --hero-button-text: #0a0a0a;
+      --result: #0f4a34;
+      --result-empty: #1b1d1b;
+      --result-text: #f3f4f1;
+      --result-text-2: #e3ebe6;
+      --result-accent: #9fd1b6;
+      --result-line: #ffffff2b;
+      --c-installers: #e66767;
+      --c-dev: #9085e9;
     }
   }
   :root[data-theme="dark"] {
@@ -93,6 +133,26 @@
     --warn-line: #8a5a2b;
     --danger: #e0533f;
     --focus: #7be0a8;
+    --band: #0a0a0a;
+    --band-text: #f3f4f1;
+    --band-text-2: #a9ada7;
+    --band-accent: #9fd1b6;
+    --band-strong: #7be0a8;
+    --band-line: #2a2c2a;
+    --band-chip: #ffffff17;
+    --band-ghost: #ffffff3d;
+    --tick-used: #3d413d;
+    --tick-free: #232523;
+    --hero-button: #7be0a8;
+    --hero-button-text: #0a0a0a;
+    --result: #0f4a34;
+    --result-empty: #1b1d1b;
+    --result-text: #f3f4f1;
+    --result-text-2: #e3ebe6;
+    --result-accent: #9fd1b6;
+    --result-line: #ffffff2b;
+    --c-installers: #e66767;
+    --c-dev: #9085e9;
   }
 
   *, *::before, *::after { box-sizing: border-box; }
@@ -145,32 +205,32 @@
   .link:disabled { opacity: .4; cursor: default; }
 
   /* ---------- ink hero ---------- */
-  .top { background: var(--ink); color: var(--on-dark); --focus: var(--mint); border-bottom: 1px solid var(--dark-line); }
+  .top { background: var(--band); color: var(--band-text); --focus: var(--band-strong); border-bottom: 1px solid var(--band-line); }
   .nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; padding-block: 14px; }
   .logo { display: inline-flex; align-items: center; gap: 9px; font: 800 20px/1 var(--f-display); letter-spacing: -0.04em; }
   .mark { width: 22px; height: 22px; }
   .tabs { display: flex; gap: 2px; }
   .tab {
     border: 0; background: none; padding: 9px 12px; border-radius: 999px; cursor: pointer; white-space: nowrap;
-    font: 500 11px/1.2 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--on-dark-2);
+    font: 500 11px/1.2 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--band-text-2);
     transition: background-color .2s, color .2s;
   }
-  .tab:hover { color: var(--on-dark); }
-  .tab[aria-current="page"] { background: #ffffff17; color: var(--mint); }
+  .tab:hover { color: var(--band-text); }
+  .tab[aria-current="page"] { background: var(--band-chip); color: var(--band-strong); }
   .strip {
     display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 24px;
-    padding-block: 10px; border-block: 1px solid var(--dark-line); color: var(--mint-text);
+    padding-block: 10px; border-block: 1px solid var(--band-line); color: var(--band-accent);
   }
   .top.slim .strip { border-bottom: 0; }
   .strip > span { display: inline-flex; align-items: center; gap: 8px; }
   .strip > .looks { gap: 2px; }
   .looks button {
     border: 0; background: none; padding: 3px 7px; border-radius: 999px; cursor: pointer;
-    font: inherit; letter-spacing: inherit; text-transform: inherit; color: var(--on-dark-2);
+    font: inherit; letter-spacing: inherit; text-transform: inherit; color: var(--band-text-2);
   }
-  .looks button:hover { color: var(--on-dark); }
-  .looks button[aria-pressed="true"] { background: #ffffff1a; color: var(--mint-text); }
-  .pulse { width: 6px; height: 6px; border-radius: 50%; background: var(--mint); animation: pulse 1.2s ease-in-out infinite; }
+  .looks button:hover { color: var(--band-text); }
+  .looks button[aria-pressed="true"] { background: var(--band-chip); color: var(--band-accent); }
+  .pulse { width: 6px; height: 6px; border-radius: 50%; background: var(--band-strong); animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .25; transform: scale(.7); } }
   .hero {
     display: grid; grid-template-columns: auto minmax(0, 36ch); justify-content: space-between; align-items: end;
@@ -180,20 +240,21 @@
   .ln { display: block; overflow: hidden; padding: .04em 0 .1em; margin-bottom: -.08em; }
   .ln > span { display: inline-flex; align-items: flex-start; transform: translateY(105%); }
   .ready .ln > span { transform: none; transition: transform 1.1s var(--ease) .05s; }
-  .hero-num small { font-size: .3em; letter-spacing: -0.02em; color: var(--mint-text); margin: .14em 0 0 .1em; }
+  .hero-num small { font-size: .3em; letter-spacing: -0.02em; color: var(--band-accent); margin: .14em 0 0 .1em; }
   .hero-side { display: grid; gap: 10px; padding-bottom: 10px; }
-  .hero-label { color: var(--mint-text); display: flex; gap: 8px; align-items: center; }
-  .hero-lede { font-size: clamp(15px, 1.3vw, 18px); line-height: 1.4; font-weight: 500; color: var(--on-dark); }
-  .hero-lede em { font-style: normal; color: var(--mint-text); }
+  .hero-label { color: var(--band-accent); display: flex; gap: 8px; align-items: center; }
+  .hero-lede { font-size: clamp(15px, 1.3vw, 18px); line-height: 1.4; font-weight: 500; color: var(--band-text); }
+  .hero-lede em { font-style: normal; color: var(--band-accent); }
   .safe { display: grid; justify-items: start; gap: 8px; margin-top: 8px; }
-  .safe span { color: var(--on-dark-2); }
+  .safe span { color: var(--band-text-2); }
+  .safe .btn-mint { background: var(--hero-button); color: var(--hero-button-text); }
   .ticks { display: flex; align-items: flex-end; gap: 3px; height: 40px; margin-top: clamp(28px, 4vw, 48px); }
   .ticks i {
-    flex: 1 1 0; min-width: 0; height: 100%; border-radius: 1px; background: #3d413d;
+    flex: 1 1 0; min-width: 0; height: 100%; border-radius: 1px; background: var(--tick-used);
     transform-origin: bottom; animation: grow .5s var(--ease) both;
     transition: background-color .5s, height .5s var(--ease);
   }
-  .ticks i.f { background: #232523; height: 30%; }
+  .ticks i.f { background: var(--tick-free); height: 30%; }
   .ticks i[data-g="trash"], .sw[data-g="trash"] { background: var(--c-trash); }
   .ticks i[data-g="apps"], .sw[data-g="apps"] { background: var(--c-apps); }
   .ticks i[data-g="temp"], .sw[data-g="temp"] { background: var(--c-temp); }
@@ -203,26 +264,27 @@
   .ticks i[data-g="leftovers"], .sw[data-g="leftovers"] { background: var(--c-leftovers); }
   .ticks i[data-g="big"], .sw[data-g="big"] { background: var(--c-big); }
   @keyframes grow { from { transform: scaleY(0); } }
-  .legend { display: flex; flex-wrap: wrap; gap: 6px 26px; padding-block: 12px 26px; color: var(--on-dark-2); }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 26px; padding-block: 12px 26px; color: var(--band-text-2); }
   .legend li { display: inline-flex; align-items: center; gap: 8px; }
-  .legend b { color: var(--on-dark); font-weight: 500; }
-  .sw { width: 8px; height: 8px; flex: none; display: inline-block; border-radius: 2px; background: #3d413d; }
-  .sw.f { background: #232523; box-shadow: inset 0 0 0 1px #3d413d; }
+  .legend b { color: var(--band-text); font-weight: 500; }
+  .sw { width: 8px; height: 8px; flex: none; display: inline-block; border-radius: 2px; background: var(--tick-used); }
+  .sw.f { background: var(--tick-free); box-shadow: inset 0 0 0 1px var(--tick-used); }
   .sec-title .sw { width: 12px; height: 12px; border-radius: 3px; margin-right: -2px; }
 
   /* ---------- result (green) ---------- */
-  .result { background: var(--green); color: var(--on-dark); --focus: var(--mint); padding-block: 18px clamp(32px, 5vw, 56px); animation: drop .6s var(--ease); }
-  .result.empty { background: #1b1d1b; }
+  .result { background: var(--result); color: var(--result-text); --focus: var(--band-strong); padding-block: 18px clamp(32px, 5vw, 56px); animation: drop .6s var(--ease); }
+  .result.empty { background: var(--result-empty); }
+  .result .btn-ghost.soft { border-color: var(--band-ghost); }
   @keyframes drop { from { opacity: 0; transform: translateY(-12px); } }
-  .r-strip { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-bottom: 12px; border-bottom: 1px solid #ffffff2b; color: var(--mint-text); }
+  .r-strip { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--result-line); color: var(--result-accent); }
   .r-title { margin-top: clamp(20px, 3vw, 36px); font-size: clamp(52px, 9vw, 132px); }
-  .r-title span { color: var(--mint-text); }
+  .r-title span { color: var(--result-accent); }
   .r-cols { display: grid; grid-template-columns: minmax(0, 38ch) minmax(0, 1fr); gap: 16px 48px; margin-top: 20px; }
-  .r-cols p { color: #e3ebe6; }
-  .r-list { display: grid; gap: 6px; font-size: 14px; color: #e3ebe6; }
+  .r-cols p { color: var(--result-text-2); }
+  .r-list { display: grid; gap: 6px; font-size: 14px; color: var(--result-text-2); }
   .r-list li { overflow-wrap: anywhere; }
-  .r-list b { color: var(--on-dark); font-weight: 600; }
-  .r-list .mono { color: var(--mint-text); display: block; margin-bottom: 2px; }
+  .r-list b { color: var(--result-text); font-weight: 600; }
+  .r-list .mono { color: var(--result-accent); display: block; margin-bottom: 2px; }
 
   /* ---------- list ---------- */
   .list { padding-block: clamp(40px, 6vw, 84px) 200px; }
@@ -301,6 +363,7 @@
   .more:hover { text-decoration: underline; }
   .quiet { display: flex; gap: 8px; align-items: center; padding: 14px 0 20px 34px; color: var(--muted); font-size: 14px; }
   .rows:not([hidden]) ~ .quiet { border-top: 1px solid var(--line); }
+  .wrap > .quiet { padding-left: 0; }
 
   /* Rows kept off the list */
   .kept { margin-top: 48px; display: grid; gap: 10px; max-width: 760px; }
@@ -340,6 +403,41 @@
   .task p { color: var(--text-2); font-size: 14.5px; max-width: 64ch; margin-top: 6px; }
   .tag.plain { border-color: var(--line); color: var(--muted); }
   .h-when { color: var(--muted); }
+  .sub-head { margin-top: clamp(40px, 6vw, 64px); padding-bottom: 12px; border-bottom: 1px solid var(--text); color: var(--muted); }
+  .chip { font: 500 10.5px/1.4 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .chip.on { border-color: transparent; background: var(--accent-soft); color: var(--accent); }
+  .check { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); cursor: pointer; }
+  .switch { position: relative; width: 44px; height: 26px; flex: none; border: 0; border-radius: 999px; background: var(--line); cursor: pointer; transition: background-color .2s; }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--bg); box-shadow: 0 1px 3px #00000040; transition: transform .2s var(--ease); }
+  .switch[aria-checked="true"] { background: var(--accent); }
+  .switch[aria-checked="true"]::after { transform: translateX(18px); }
+  .switch:disabled { opacity: .4; cursor: default; }
+  .inline-select { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 2px 6px; }
+  .keep-list { display: grid; gap: 2px; margin-top: 10px; }
+  .keep-list label { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 12px; align-items: start; padding: 8px 10px; border-radius: 10px; cursor: pointer; }
+  .keep-list label:hover { background: var(--panel); }
+  .keep-list input { margin-top: 3px; accent-color: var(--accent); }
+  .tag-keep { font: 500 10.5px/1.4 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+  .progress { height: 4px; margin-top: 14px; background: var(--line); border-radius: 2px; overflow: hidden; max-width: 520px; }
+  .progress i { display: block; height: 100%; background: var(--bar); border-radius: 2px; transition: width .4s linear; }
+  /* Free space over time: one line, a 10% wash under it, hairline grid, dots where headroom freed space. */
+  .chart { margin-top: clamp(28px, 4vw, 48px); }
+  .chart-box { position: relative; margin-top: 12px; }
+  .chart-box svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .chart-box:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+  .grid line { stroke: var(--line); stroke-width: 1; }
+  .axis text, .axis-label { fill: var(--muted); font: 11px var(--f-mono); }
+  .mark-label { fill: var(--text-2); font: 11px var(--f-mono); }
+  .series { fill: none; stroke: var(--bar); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .wash { fill: var(--bar); opacity: .1; }
+  .freed { fill: var(--text); stroke: var(--bg); stroke-width: 2; }
+  .cross { stroke: var(--muted); stroke-width: 1; }
+  .tip { position: absolute; top: 0; pointer-events: none; padding: 8px 10px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); box-shadow: 0 8px 24px #0000001f; font-size: 13px; white-space: nowrap; }
+  .tip b { display: block; font-size: 15px; }
+  .tip span { display: block; color: var(--muted); }
+  .chart details { margin-top: 10px; font-size: 13px; color: var(--text-2); }
+  .chart table { margin-top: 8px; border-collapse: collapse; font: 12px var(--f-mono); }
+  .chart td, .chart th { padding: 3px 14px 3px 0; text-align: left; border-bottom: 1px solid var(--line); }
 
   /* ---------- floating pill ---------- */
   .dock { position: fixed; z-index: 10; left: 0; right: 0; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); display: flex; justify-content: center; padding-inline: var(--gutter); pointer-events: none; }
@@ -395,16 +493,16 @@
   .c-acts .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 45%, transparent); }
 
   /* ---------- closed ---------- */
-  .gone { min-height: 100vh; display: grid; place-items: center; background: var(--ink); color: var(--on-dark); padding: 24px var(--gutter); --focus: var(--mint); }
+  .gone { min-height: 100vh; display: grid; place-items: center; background: var(--band); color: var(--band-text); padding: 24px var(--gutter); --focus: var(--band-strong); }
   .gone-in { max-width: 640px; display: grid; gap: 16px; }
   .gone-in .mark { width: 44px; height: 44px; }
-  .gone-in .mono { color: var(--mint-text); }
+  .gone-in .mono { color: var(--band-accent); }
   .gone-in h1 { font-size: clamp(44px, 8vw, 92px); }
-  .gone-in p:last-child { color: var(--on-dark-2); font-size: 17px; max-width: 46ch; }
+  .gone-in p:last-child { color: var(--band-text-2); font-size: 17px; max-width: 46ch; }
 
   @media (max-width: 760px) {
     .tabs { width: 100%; justify-content: space-between; }
-    .tab { padding: 8px 6px; font-size: 10.5px; letter-spacing: .04em; }
+    .tab { padding: 8px 4px; font-size: 10px; letter-spacing: .02em; }
     .hero { grid-template-columns: minmax(0, 1fr); }
     .hero-num { font-size: 27vw; }
     .list-head { grid-template-columns: minmax(0, 1fr); }
@@ -477,6 +575,7 @@
           <button class="tab" type="button" data-view="clean" aria-current="page">Clean</button>
           <button class="tab" type="button" data-view="apps">Uninstall</button>
           <button class="tab" type="button" data-view="disk">Disk</button>
+          <button class="tab" type="button" data-view="startup">Startup</button>
           <button class="tab" type="button" data-view="tune">Maintenance</button>
           <button class="tab" type="button" data-view="history">History</button>
         </div>
@@ -548,11 +647,25 @@
           <button type="button" data-view="places" aria-pressed="true">Biggest places</button>
           <button type="button" data-view="big" aria-pressed="false">Largest files</button>
           <button type="button" data-view="old" aria-pressed="false">Old downloads</button>
+          <button type="button" data-view="dupes" aria-pressed="false">Duplicates</button>
         </div>
         <span class="mono status" id="disk-status"></span>
       </div>
       <nav class="trail" id="trail" aria-label="Folder" hidden></nav>
       <ul class="plain" id="disk-list"></ul>
+    </div>
+  </main>
+
+  <main class="list" id="view-startup" hidden>
+    <div class="wrap">
+      <div class="list-head">
+        <h2 class="display">What starts <span>up.</span></h2>
+        <p>Programs that start when your Mac does or when you log in. Turn off your own ones here; they stay installed, and you can turn them on again.</p>
+      </div>
+      <div class="tool-bar"><span class="mono status" id="su-status"></span>
+        <label class="check"><input type="checkbox" id="su-apple"> Show Apple's too</label></div>
+      <ul class="plain" id="su-list"></ul>
+      <p class="quiet">Apps that open when you log in are in System Settings → General → Login Items.</p>
     </div>
   </main>
 
@@ -563,6 +676,8 @@
         <p>Things macOS can redo for itself when something looks stuck. Run one only when you need it.</p>
       </div>
       <ul class="plain acc" id="tasks"></ul>
+      <h3 class="mono sub-head">Reminders</h3>
+      <ul class="plain" id="reminders"></ul>
     </div>
   </main>
 
@@ -572,6 +687,11 @@
         <h2 class="display">What <span>went.</span></h2>
         <p>Everything headroom deleted or moved to the Trash, newest first.</p>
       </div>
+      <section class="chart" aria-labelledby="space-title">
+        <h3 class="mono" id="space-title">Free space over time</h3>
+        <div class="chart-box" id="space-chart" tabindex="0" aria-label="Free space over time. Use the arrow keys to read each point."></div>
+        <details id="space-details"><summary>As a table</summary><table id="space-table"></table></details>
+      </section>
       <div class="tool-bar"><span class="mono status" id="h-status"></span></div>
       <ul class="plain" id="h-list"></ul>
     </div>
@@ -643,13 +763,13 @@ const GROUPS = [
     blurb: 'node_modules, .next, dist, build, .build and target folders in your projects. Your code is untouched and folders git tracks are left alone, but each project needs an install or a build before it runs again.' },
   { id: 'leftovers', title: 'Leftovers of deleted apps', caution: true,
     blurb: 'Settings and data that apps you removed left in your Library. Only apps headroom can’t find on this Mac are listed. If you install one again, it starts fresh.' },
-  { id: 'big', title: 'Emulators, models and other big downloads', caution: true,
-    blurb: 'Emulators and simulators lose their apps and data, models need downloading again, and archives are only for reading old crash reports.' },
+  { id: 'big', title: 'Backups, emulators and big downloads', caution: true,
+    blurb: 'iPhone and iPad backups go to the Trash, since one may be your only copy. Emulators lose their apps and data, models and Docker containers come back only if you fetch them again, and a Docker volume can hold a database.' },
 ];
 const KNOWN = new Set(GROUPS.map(g => g.id));
 const CAUTION = new Set(GROUPS.filter(g => g.caution).map(g => g.id));
 const NUM = Object.fromEntries(GROUPS.map((g, i) => [g.id, String(i + 1).padStart(2, '0')]));
-const SHORT = { trash: 'Trash & browsers', apps: 'App caches', temp: 'Logs & temp', installers: 'Installers', dev: 'Dev tools', builds: 'Build folders', leftovers: 'App leftovers', big: 'Emulators & models' };
+const SHORT = { trash: 'Trash & browsers', apps: 'App caches', temp: 'Logs & temp', installers: 'Installers', dev: 'Dev tools', builds: 'Build folders', leftovers: 'App leftovers', big: 'Backups & big downloads' };
 const SHOWN = 8;          // rows a section shows before "Show N more"
 const POLL_MS = 400;
 const RUN = document.querySelector('meta[name="headroom-run"]').content;
@@ -1324,9 +1444,19 @@ function askDelete(safe) {
   }
   // One sentence: where they go, and the one thing worth a second look.
   const risky = chosen.filter(row => CAUTION.has(row.group)).length;
-  const text = [S.deleting
-    ? 'They go once the current delete finishes, straight off this Mac, not to the Trash.'
-    : 'They go straight off this Mac, not to the Trash.'];
+  // Backups go to the Trash; everything else straight off.
+  const toTrash = chosen.filter(row => row.trash).length;
+  const where = toTrash === n ? 'They go to the Trash, so you can still put them back.'
+    : toTrash ? `${toTrash === 1 ? 'The backup goes' : 'The backups go'} to the Trash; the rest go straight off this Mac.`
+    : 'They go straight off this Mac, not to the Trash.';
+  const text = [S.deleting ? 'They go once the current delete finishes. ' + where : where];
+  if (toTrash === n) {
+    return ask({
+      title: `Move ${n === 1 ? 'this backup' : n + ' backups'} to the Trash?`,
+      text: `You can still put ${n === 1 ? 'it' : 'them'} back from the Trash. A backup may be your only copy of that device if it isn’t in iCloud.`,
+      lines, yes: 'Move to Trash · ' + size(sumKb(chosen)), style: 'btn-ink',
+    }, () => startDelete(ids));
+  }
   if (risky) {
     const which = risky === n ? (n === 1 ? 'It isn’t a cache' : 'None of them are caches')
       : `${risky} of them ${risky === 1 ? 'isn’t a cache' : 'aren’t caches'}`;
@@ -1616,7 +1746,7 @@ function dismissResult() {
 
 /* ---------- views ---------- */
 
-const VIEWS = ['clean', 'apps', 'disk', 'tune', 'history'];
+const VIEWS = ['clean', 'apps', 'disk', 'startup', 'tune', 'history'];
 
 function show(view) {
   if (S.gone || !VIEWS.includes(view)) return;
@@ -1633,8 +1763,9 @@ function show(view) {
   if (first) scrollTo({ top: 0 });
   if (view === 'apps' && !A.loaded && !A.loading) loadApps();
   if (view === 'disk' && !D.data && !D.loading) loadDisk('places', '');
-  if (view === 'tune') renderTasks();
-  if (view === 'history') loadHistory();
+  if (view === 'startup') loadStartup();
+  if (view === 'tune') { renderTasks(); loadSettings(); }
+  if (view === 'history') { loadHistory(); loadSpace(); }
   render();
 }
 
@@ -1747,6 +1878,7 @@ async function loadDisk(view, id) {
 
 function renderDisk() {
   for (const button of $('seg').children) button.setAttribute('aria-pressed', String(button.dataset.view === D.view));
+  if (D.view === 'dupes') return renderDupes();
   const data = D.data || {};
   const trail = $('trail');
   trail.hidden = D.view !== 'places' || !D.id;
@@ -1873,8 +2005,10 @@ async function runTask(task) {
 
 /* ---------- history ---------- */
 
-const RESULT_TEXT = { deleted: 'Deleted', partly: 'Partly done', failed: 'Not done', trashed: 'Moved to the Trash' };
-const SECTION_TEXT = { ...Object.fromEntries(GROUPS.map(g => [g.id, g.title])), uninstall: 'Uninstalled', disk: 'Disk explorer' };
+const RESULT_TEXT = { deleted: 'Deleted', partly: 'Partly done', failed: 'Not done', trashed: 'Moved to the Trash',
+  'turned-off': 'Turned off', 'turned-on': 'Turned on' };
+const SECTION_TEXT = { ...Object.fromEntries(GROUPS.map(g => [g.id, g.title])), uninstall: 'Uninstalled', disk: 'Disk explorer',
+  duplicates: 'Duplicates', startup: 'Startup' };
 
 function when(at) {
   const date = new Date(at);
@@ -1895,7 +2029,7 @@ async function loadHistory() {
     return;
   }
   const entries = data.items || [];
-  $('h-status').textContent = entries.length ? `${entries.length === 1 ? '1 entry' : entries.length + ' entries'} · kept in ${data.file}` : '';
+  $('h-status').textContent = 'Deleted and moved' + (entries.length ? ` · ${entries.length === 1 ? '1 entry' : entries.length + ' entries'} · kept in ${data.file}` : '');
   if (!entries.length) return $('h-list').replaceChildren(quietLine('Nothing yet. Whatever headroom deletes or moves to the Trash shows up here.'));
   $('h-list').replaceChildren(...entries.map(entry => {
     const paths = Array.isArray(entry.paths) ? entry.paths : [];
@@ -1912,6 +2046,375 @@ async function loadHistory() {
 }
 
 /* ---------- closed ---------- */
+
+/* ---------- duplicates (a view of the Disk tab) ---------- */
+
+const DP = { data: null, choice: {}, timer: 0, busy: false, result: null };
+
+async function showDupes() {
+  D.view = 'dupes';
+  $('trail').hidden = true;
+  renderDupes();
+  try {
+    DP.data = await get('/api/dupes');
+  } catch (error) {
+    if (error instanceof TypeError) return showGone();
+  }
+  if (DP.data && DP.data.running) pollDupes();
+  renderDupes();
+}
+
+async function findDupes() {
+  DP.result = null;
+  DP.choice = {};
+  try {
+    await api('/api/dupes', {});
+  } catch (error) {
+    if (error instanceof TypeError) return error instanceof AppClosed ? null : showGone();
+  }
+  DP.data = Object.assign(DP.data || {}, { running: true, phase: 'Listing files', done: 0, total: 0 });
+  renderDupes();
+  pollDupes();
+}
+
+function pollDupes() {
+  clearTimeout(DP.timer);
+  DP.timer = setTimeout(async () => {
+    try {
+      DP.data = await get('/api/dupes');
+    } catch (error) {
+      if (error instanceof TypeError) return showGone();
+    }
+    if (D.view === 'dupes') renderDupes();
+    if (DP.data.running) pollDupes();
+    else announce(DP.data.groups.length ? `Found ${DP.data.groups.length} sets of duplicates.` : 'No duplicates found.');
+  }, 600);
+}
+
+const extra = group => group.kb * (group.files.length - 1);
+
+function renderDupes() {
+  if (D.view !== 'dupes') return;
+  for (const button of $('seg').children) button.setAttribute('aria-pressed', String(button.dataset.view === 'dupes'));
+  const data = DP.data;
+  const list = $('disk-list');
+  if (!data) {
+    $('disk-status').replaceChildren(spinner(), 'One moment');
+    return list.replaceChildren();
+  }
+  if (data.running) {
+    $('disk-status').replaceChildren(spinner(), data.phase || 'Looking');
+    const share = data.total ? Math.min(1, data.done / data.total) : 0;
+    return list.replaceChildren(el('li', { class: 'item' }, el('div', {},
+      el('p', { class: 'item-name', text: data.phase || 'Looking' }),
+      el('span', { class: 'row-detail', text: data.total ? `${size(data.done / 1024)} of ${size(data.total / 1024)} read` : `${data.files || 0} files of 1 MB or more` }),
+      el('div', { class: 'progress', role: 'progressbar', 'aria-label': 'Looking for duplicates', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round(share * 100)) },
+        el('i', { style: `width:${(share * 100).toFixed(1)}%` })))));
+  }
+  const groups = data.groups || [];
+  const total = groups.reduce((t, g) => t + extra(g), 0);
+  $('disk-status').textContent = data.at ? (groups.length ? `${groups.length} ${groups.length === 1 ? 'set' : 'sets'} · ${size(total)} in extra copies` : 'No duplicates') : '';
+  const intro = data.at
+    ? (groups.length ? 'In each set the newest copy stays unless you pick another. The others go to the Trash.' : 'No file of 1 MB or more appears twice in Downloads, Desktop or Documents.')
+    : 'Looks for files of 1 MB or more that appear twice in Downloads, Desktop and Documents, by their contents. Files kept only in iCloud are skipped, so nothing downloads.';
+  const lines = [el('li', { class: 'item' },
+    el('div', {}, el('p', { class: 'row-detail', text: intro }),
+      data.capped && el('p', { class: 'row-note info' }, icon('info'), el('span', { text: 'Stopped after reading 8 GB. Search again to carry on from there.' })),
+      DP.result && el('p', { class: 'done-note' + (DP.result.ok ? '' : ' bad') }, icon(DP.result.ok ? 'check' : 'warn'), el('span', { text: DP.result.text }))),
+    el('div', { class: 'item-side' },
+      groups.length > 1 && el('button', { type: 'button', class: 'btn btn-ghost sm', disabled: DP.busy, text: `Move all extras to Trash · ${size(total)}`, onclick: () => askExtras(groups) }),
+      el('button', { type: 'button', class: 'btn btn-ink sm', disabled: DP.busy, text: data.at ? 'Search again' : 'Find duplicates', onclick: findDupes })))];
+  for (const group of groups) {
+    const keep = DP.choice[group.id] || group.keep;
+    const files = group.files.map(file => el('label', {},
+      el('input', { type: 'radio', name: 'keep-' + group.id, checked: file.id === keep, 'aria-label': `Keep ${file.name} in ${file.folder}`,
+        onchange: () => { DP.choice[group.id] = file.id; renderDupes(); } }),
+      el('span', {}, el('span', { class: 'row-name', text: file.name }),
+        el('span', { class: 'row-detail', text: `${file.folder} · changed ${file.when}` })),
+      el('span', { class: 'tag-keep', text: file.id === keep ? 'Keep' : '' })));
+    lines.push(el('li', { class: 'item' },
+      el('div', {}, el('p', { class: 'item-name', text: `${group.files.length} copies of ${group.files[0].name}` }),
+        el('span', { class: 'row-detail', text: `${size(group.kb)} each · ${size(extra(group))} in extra copies` }),
+        el('div', { class: 'keep-list', role: 'radiogroup', 'aria-label': 'Which copy to keep' }, ...files)),
+      el('div', { class: 'item-side' }, el('button', { type: 'button', class: 'btn btn-ghost sm', disabled: DP.busy,
+        text: `Move ${group.files.length - 1} to Trash`, onclick: () => askExtras([group]) }))));
+  }
+  list.replaceChildren(...lines);
+}
+
+function askExtras(groups) {
+  const going = groups.flatMap(group => {
+    const keep = DP.choice[group.id] || group.keep;
+    return group.files.filter(file => file.id !== keep).map(file => [`${file.folder}/${file.name}`, group.kb]);
+  });
+  ask({
+    title: `Move ${going.length === 1 ? 'this copy' : going.length + ' copies'} to the Trash?`,
+    text: `One copy of each stays where it is. Empty the Trash to free ${size(going.reduce((t, [, kb]) => t + kb, 0))}.`,
+    lines: going, yes: 'Move to Trash', style: 'btn-ink',
+  }, async () => {
+    DP.busy = true;
+    renderDupes();
+    let out;
+    try {
+      out = await api('/api/dupes/trash', { groups: groups.map(group => ({ id: group.id, keep: DP.choice[group.id] || group.keep })) });
+    } catch (error) {
+      DP.busy = false;
+      if (error instanceof TypeError) return error instanceof AppClosed ? null : showGone();
+      out = { moved: 0, problems: [error.message] };
+    }
+    DP.busy = false;
+    const problems = out.problems || [];
+    DP.result = { ok: !problems.length, text: out.moved
+      ? `Moved ${out.moved === 1 ? '1 copy' : out.moved + ' copies'} to the Trash · ${size(out.freed_kb)}.` + (problems.length ? ' ' + problems[0] : '')
+      : problems[0] || 'Nothing moved.' };
+    try { DP.data = await get('/api/dupes'); } catch (error) { if (error instanceof TypeError) return showGone(); }
+    renderDupes();
+    announce(DP.result.text);
+  });
+}
+
+/* ---------- startup items ---------- */
+
+const SU = { items: [], loading: false, busy: null, result: {} };
+const STATE_TEXT = { running: 'Running', on: 'On', off: 'Off', 'not loaded': 'Not loaded' };
+
+async function loadStartup() {
+  SU.loading = true;
+  renderStartup();
+  try {
+    SU.items = (await get('/api/startup' + ($('su-apple').checked ? '?apple=1' : ''))).items || [];
+  } catch (error) {
+    if (error instanceof TypeError) return showGone();
+  }
+  SU.loading = false;
+  renderStartup();
+}
+
+function renderStartup() {
+  $('su-status').replaceChildren(...(SU.loading ? [spinner(), 'Reading'] : [`${SU.items.length} items`]));
+  const lines = [];
+  let scope = '';
+  for (const entry of SU.items) {
+    if (entry.scope !== scope) {
+      scope = entry.scope;
+      lines.push(el('li', {}, el('p', { class: 'quiet', text: scope === 'user'
+        ? 'Yours. You can turn these off and on again.'
+        : 'For every user on this Mac. Shown only: the app they belong to can remove them.' })));
+    }
+    const result = SU.result[entry.id];
+    const off = entry.state === 'off';
+    const main = el('div', {},
+      el('p', { class: 'item-name', text: entry.label }),
+      (entry.own || entry.app) && el('span', { class: 'row-detail', text: entry.own ? `Used by ${entry.own}` : entry.app }),
+      entry.explain && el('span', { class: 'row-detail', text: entry.explain }),
+      entry.program && el('span', { class: 'row-detail', text: entry.program }));
+    if (result) main.append(el('span', { class: 'done-note' + (result.ok ? '' : ' bad') }, icon(result.ok ? 'check' : 'warn'), el('span', { text: result.text })));
+    lines.push(el('li', { class: 'item' }, main, el('div', { class: 'item-side' },
+      entry.state && el('span', { class: 'chip' + (entry.state === 'running' || entry.state === 'on' ? ' on' : ''), text: STATE_TEXT[entry.state] || entry.state }),
+      entry.scope === 'user' && el('button', { type: 'button', class: 'btn btn-ghost sm', disabled: SU.busy !== null,
+        text: off ? 'Turn on' : 'Turn off', 'aria-label': `${off ? 'Turn on' : 'Turn off'} ${entry.label}`,
+        onclick: () => off ? switchStartup(entry, true) : askStartupOff(entry) }))));
+  }
+  if (!SU.items.length && !SU.loading) lines.push(quietLine('Nothing starts up here.'));
+  $('su-list').replaceChildren(...lines);
+}
+
+function askStartupOff(entry) {
+  const text = [`${entry.label} stops now and won’t start at login. It stays installed, and you can turn it on again here.`];
+  if (entry.own) text.push(' ', el('strong', { text: `headroom${entry.own.includes('harbor') ? ' or harbor' : ''} relies on it. ${entry.explain}` }));
+  ask({ title: `Turn off ${entry.label}?`, text, yes: 'Turn off', style: 'btn-ink' }, () => switchStartup(entry, false));
+}
+
+async function switchStartup(entry, on) {
+  SU.busy = entry.id;
+  renderStartup();
+  let out;
+  try {
+    out = await api('/api/startup', { id: entry.id, on });
+  } catch (error) {
+    SU.busy = null;
+    if (error instanceof TypeError) return error instanceof AppClosed ? null : showGone();
+    out = { error: error.message };
+  }
+  SU.busy = null;
+  SU.result[entry.id] = out.error ? { ok: false, text: out.error } : { ok: true, text: on ? 'Turned on.' : 'Turned off.' };
+  await loadStartup();
+  announce(`${entry.label}: ${SU.result[entry.id].text}`);
+}
+
+/* ---------- reminders (Maintenance tab) ---------- */
+
+const RM = { data: null, busy: false };
+
+async function loadSettings() {
+  try {
+    RM.data = await get('/api/settings');
+  } catch (error) {
+    if (error instanceof TypeError) return showGone();
+  }
+  renderReminders();
+}
+
+async function saveSettings(change) {
+  RM.busy = true;
+  renderReminders();
+  try {
+    RM.data = await api('/api/settings', change);
+  } catch (error) {
+    if (error instanceof TypeError && !(error instanceof AppClosed)) showGone();
+  }
+  RM.busy = false;
+  renderReminders();
+}
+
+function renderReminders() {
+  const data = RM.data;
+  if (!data) return $('reminders').replaceChildren(quietLine(spinner(), 'Reading'));
+  const off = !data.available || RM.busy;
+  const toggle = (key, label) => el('button', { type: 'button', class: 'switch', role: 'switch', 'aria-checked': String(data[key]),
+    'aria-label': label, disabled: off, onclick: () => saveSettings({ [key]: !data[key] }) });
+  const choose = el('select', { class: 'inline-select', disabled: off || !data.alert, 'aria-label': 'Warn below',
+    onchange: event => saveSettings({ alert_gb: Number(event.target.value) }) },
+    ...[5, 10, 20, 30, 50, 100].map(gb => el('option', { value: String(gb), text: gb + ' GB', selected: gb === data.alert_gb })));
+  const lines = [
+    el('li', { class: 'task' }, el('div', {}, el('h3', {}, 'Tell me when space runs low'),
+      el('p', {}, 'A notification when free space drops below ', choose, '. headroom checks every half hour, and says it again only after six hours or another 5 GB gone.')),
+      toggle('alert', 'Tell me when space runs low')),
+    el('li', { class: 'task' }, el('div', {}, el('h3', {}, 'Weekly Safe clean reminder'),
+      el('p', { text: 'Once a week, if Safe clean would free 500 MB or more, a notification says how much. Nothing is ever deleted on its own.' })),
+      toggle('weekly', 'Weekly Safe clean reminder')),
+  ];
+  if (!data.available) lines.push(quietLine(icon('info'), 'Reminders work when headroom runs from Applications.'));
+  $('reminders').replaceChildren(...lines);
+}
+
+/* ---------- free space over time (History tab) ---------- */
+
+const SP = { data: null, index: -1, points: [] };
+const SVGNS = 'http://www.w3.org/2000/svg';
+function svg(tag, attrs, ...kids) {
+  const node = document.createElementNS(SVGNS, tag);
+  for (const [key, value] of Object.entries(attrs || {})) node.setAttribute(key, value);
+  for (const kid of kids) if (kid) node.append(kid);
+  return node;
+}
+const day = t => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+const moment = t => new Date(t * 1000).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+
+async function loadSpace() {
+  try {
+    SP.data = await get('/api/space');
+  } catch (error) {
+    if (error instanceof TypeError) return showGone();
+    return;
+  }
+  SP.index = -1;
+  renderSpace();
+}
+
+function renderSpace() {
+  const box = $('space-chart');
+  const data = SP.data;
+  if (!data) return;
+  let points = data.samples;
+  if (points.length > 600) {              // keep the drawing light: every n-th reading, and the last
+    const step = Math.ceil(points.length / 600);
+    points = points.filter((_, i) => i % step === 0 || i === data.samples.length - 1);
+  }
+  SP.points = points;
+  if (points.length < 2) {
+    box.replaceChildren(el('p', { class: 'quiet', text: 'The chart fills in as headroom checks free space: at every scan, and every half hour while reminders are on.' }));
+    $('space-details').hidden = true;
+    return;
+  }
+  $('space-details').hidden = false;
+  const width = Math.max(280, box.clientWidth || 600), height = width < 500 ? 190 : 240;
+  const left = 54, right = 12, top = 18, bottom = 26;
+  const t0 = points[0][0], t1 = points[points.length - 1][0];
+  const peak = Math.max(...points.map(p => p[1])) * 1024 / 1e9;
+  const stepGb = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000].find(s => peak / s <= 4) || 1000;
+  const yMax = Math.max(stepGb, Math.ceil(peak / stepGb) * stepGb);
+  const x = t => left + (t - t0) / Math.max(1, t1 - t0) * (width - left - right);
+  const y = kb => top + (1 - kb * 1024 / 1e9 / yMax) * (height - top - bottom);
+  const grid = svg('g', { class: 'grid' }), axis = svg('g', { class: 'axis' });
+  for (let gb = 0; gb <= yMax + 1e-9; gb += stepGb) {
+    const at = y(gb * 1e9 / 1024);
+    grid.append(svg('line', { x1: left, x2: width - right, y1: at, y2: at }));
+    axis.append(svg('text', { x: left - 8, y: at + 4, 'text-anchor': 'end' }, document.createTextNode(gb + ' GB')));
+  }
+  for (const t of [t0, (t0 + t1) / 2, t1]) {
+    axis.append(svg('text', { x: x(t), y: height - 6, 'text-anchor': t === t0 ? 'start' : t === t1 ? 'end' : 'middle' }, document.createTextNode(day(t))));
+  }
+  const path = points.map((p, i) => `${i ? 'L' : 'M'}${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join('');
+  const base = y(0).toFixed(1);
+  const wash = svg('path', { class: 'wash', d: `${path}L${x(t1).toFixed(1)},${base}L${x(t0).toFixed(1)},${base}Z` });
+  const line = svg('path', { class: 'series', d: path });
+  // Where headroom freed space: a dot on the line, the biggest one named.
+  const marks = data.marks.filter(m => m[0] >= t0 && m[0] <= t1);
+  const level = t => {
+    const i = points.findIndex(p => p[0] >= t);
+    if (i <= 0) return points[Math.max(0, i)][1];
+    const [ta, ka] = points[i - 1], [tb, kb] = points[i];
+    return ka + (kb - ka) * (t - ta) / Math.max(1, tb - ta);
+  };
+  const dots = svg('g', {});
+  for (const m of marks) dots.append(svg('circle', { class: 'freed', cx: x(m[0]), cy: y(level(m[0])), r: 4.5 }));
+  const biggest = marks.reduce((a, m) => (!a || m[1] > a[1] ? m : a), null);
+  if (biggest) {
+    const bx = x(biggest[0]);
+    const roomLeft = bx - left > 110;
+    const high = Math.max(level(biggest[0]), level(Math.min(t1, biggest[0] + (t1 - t0) / 40)));   // above the jump, too
+    dots.append(svg('text', { class: 'mark-label', x: roomLeft ? bx - 10 : bx + 10, y: Math.max(12, y(high) - 10),
+      'text-anchor': roomLeft ? 'end' : 'start' }, document.createTextNode('Freed ' + size(biggest[1]))));
+  }
+  const cross = svg('line', { class: 'cross', y1: top, y2: height - bottom, visibility: 'hidden' });
+  const chart = svg('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img',
+    'aria-label': `Free space from ${day(t0)} to ${day(t1)}, now ${size(points[points.length - 1][1])}. headroom freed space ${marks.length} ${marks.length === 1 ? 'time' : 'times'}.` },
+    grid, wash, line, axis, cross, dots);
+  const tip = el('div', { class: 'tip', hidden: true });
+  box.replaceChildren(chart, tip);
+  // The crosshair snaps to the nearest reading; the tooltip says how much was free, and what was freed then.
+  const showAt = index => {
+    SP.index = Math.max(0, Math.min(points.length - 1, index));
+    const [t, kb] = points[SP.index];
+    const px = x(t);
+    cross.setAttribute('x1', px);
+    cross.setAttribute('x2', px);
+    cross.setAttribute('visibility', 'visible');
+    const near = marks.filter(m => Math.abs(m[0] - t) <= Math.max(900, (t1 - t0) / 60));
+    tip.replaceChildren(el('b', { text: size(kb) + ' free' }), el('span', { text: moment(t) }),
+      ...near.map(m => el('span', { text: `headroom freed ${size(m[1])} (${m[2] === 1 ? '1 item' : m[2] + ' items'})` })));
+    tip.hidden = false;
+    const scale = box.clientWidth / width;
+    const room = box.clientWidth - tip.offsetWidth;
+    const at = px * scale + 12 > room ? px * scale - tip.offsetWidth - 12 : px * scale + 12;
+    tip.style.left = Math.max(0, Math.min(room, at)) + 'px';
+  };
+  const hide = () => { tip.hidden = true; cross.setAttribute('visibility', 'hidden'); };
+  chart.addEventListener('pointermove', event => {
+    const rect = chart.getBoundingClientRect();
+    const t = t0 + ((event.clientX - rect.left) / rect.width * width - left) / (width - left - right) * (t1 - t0);
+    let best = 0;
+    points.forEach((p, i) => { if (Math.abs(p[0] - t) < Math.abs(points[best][0] - t)) best = i; });
+    showAt(best);
+  });
+  chart.addEventListener('pointerleave', hide);
+  box.onkeydown = event => {
+    if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+      event.preventDefault();
+      showAt(SP.index < 0 ? points.length - 1 : SP.index + (event.key === 'ArrowRight' ? 1 : -1));
+    } else if (event.key === 'Escape') hide();
+  };
+  box.onblur = hide;
+  // The same readings as a table, newest first.
+  const rows = [el('tr', {}, el('th', { text: 'When' }), el('th', { text: 'Free' }), el('th', { text: 'Freed by headroom' }))];
+  const all = [...data.samples.slice(-60).map(([t, kb]) => [t, size(kb), '']),
+               ...data.marks.slice(-30).map(([t, kb, n]) => [t, '', `${size(kb)} (${n === 1 ? '1 item' : n + ' items'})`])];
+  for (const [t, free, freed] of all.sort((a, b) => b[0] - a[0])) rows.push(el('tr', {}, el('td', { text: moment(t) }), el('td', { text: free }), el('td', { text: freed })));
+  $('space-table').replaceChildren(...rows);
+}
+addEventListener('resize', () => { if (S.view === 'history' && SP.data) renderSpace(); });
+
 
 function showGone(title = 'headroom has closed', text = 'Open it again from Applications to carry on.') {
   if (S.gone) return;
@@ -1967,8 +2470,10 @@ $('tabs').addEventListener('click', event => {
 });
 $('seg').addEventListener('click', event => {
   const button = event.target.closest('[data-view]');
+  if (button && button.dataset.view === 'dupes') return showDupes();
   if (button && !D.loading) loadDisk(button.dataset.view, '');
 });
+$('su-apple').addEventListener('change', loadStartup);
 $('apps-again').addEventListener('click', loadApps);
 
 // Light, Dark, or Auto (follow the Mac). Kept in this browser only; Auto when storage is off.

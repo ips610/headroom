@@ -5,6 +5,7 @@ Finder, the Trash, Spotlight and administrator commands are swapped for a record
     python3 test_cleaner.py
 """
 import contextlib
+import datetime
 import http.client
 import io
 import json
@@ -77,15 +78,18 @@ def agent(label, program):
 
 
 class Recorder:
-    """Stands in for run(): records what would reach Finder, Spotlight or an admin prompt,
-    and passes harmless programs (du, ps, git, rm inside the test folder) through."""
-    def __init__(self, returncode=0, stderr=""):
-        self.calls, self.returncode, self.stderr = [], returncode, stderr
+    """Stands in for run(): records what would reach Finder, Spotlight, launchctl, Homebrew, Docker
+    or an admin prompt, and passes harmless programs (du, ps, git, rm inside the test folder) through.
+    `answer(command)` gives a recorded command's (returncode, output); `fakes` are fake programs."""
+    def __init__(self, returncode=0, stderr="", answer=None, fakes=()):
+        self.calls, self.returncode, self.stderr, self.answer, self.fakes = [], returncode, stderr, answer, fakes
 
     def __call__(self, command, timeout=None):
-        if command[0] in ("/usr/bin/osascript", "/usr/bin/open", "/usr/bin/qlmanage", "/usr/bin/mdls"):
+        if command[0] in ("/usr/bin/osascript", "/usr/bin/open", "/usr/bin/qlmanage", "/usr/bin/mdls",
+                          "/bin/launchctl", "/usr/bin/env") + tuple(self.fakes):
             self.calls.append(command)
-            return subprocess.CompletedProcess(command, self.returncode, "", self.stderr)
+            code, out = self.answer(command) if self.answer else (self.returncode, "")
+            return subprocess.CompletedProcess(command, code, out, self.stderr)
         assert command[0] in ("/usr/bin/du", "/bin/ps", "/bin/rm") or command[0].endswith("/git"), command
         return real_run(command, timeout)
 
@@ -637,6 +641,268 @@ try:
     finally:
         cleaner.developer_dir = real_developer
 
+    # --- iPhone and iPad backups: your data, so they go to the Trash ------------------------
+    backups = os.path.join(cleaner.HOME, "Library", "Application Support", "MobileSync", "Backup")
+    put("00008110-000A", "Manifest.db", kb=300, root=backups)
+    with open(os.path.join(backups, "00008110-000A", "Info.plist"), "wb") as handle:
+        plistlib.dump({"Device Name": "Ishpuneet's iPhone", "Product Type": "iPhone14,2",
+                       "Last Backup Date": datetime.datetime(2026, 3, 2, 9, 30)}, handle)
+    phone = named(cleaner.scan_backups()[0])["Ishpuneet's iPhone backup"]
+    assert phone["group"] == "big" and phone["trash"] and "only copy" in phone["note"], phone
+    assert "iPhone14,2" in phone["detail"] and "2 Mar 2026" in phone["detail"], phone["detail"]
+    assert cleaner.public(phone, "")["trash"] and not cleaner.public(phone, "")["safe"]
+    with recording(Recorder()) as recorder:
+        out = cleaner.delete(phone)
+    assert recorder.calls == [["/usr/bin/osascript", "-e", cleaner.TRASH_SCRIPT, phone["paths"][0]]], recorder.calls
+    assert out["errors"] == [] and os.path.exists(phone["paths"][0]), "Finder moves it; the recorder stood in"
+    with recording(Recorder()):
+        cleaner.JOB.update(results=[], done_kb=0)
+        cleaner.run_job([phone])
+    assert cleaner.history()[0]["result"] == "trashed" and cleaner.history()[0]["what"] == "Ishpuneet's iPhone backup"
+    os.chmod(backups, 0)
+    rows, notice = cleaner.scan_backups()
+    assert rows == [] and "backups" in notice and "Full Disk Access" in notice, notice
+    os.chmod(backups, 0o755)
+    ipsw = put("Library", "iTunes", "iPhone Software Updates", "iPhone15,2_27.0_Restore.ipsw", kb=200)
+    assert named(cleaner.scan_installers())["iPhone15,2_27.0_Restore.ipsw"]["paths"] == [ipsw]
+
+    # --- Homebrew: Homebrew's own commands, run through a stand-in ------------------------------
+    brew_home = os.path.join(box, "brew")
+    brew = put("bin", "brew", kb=0, root=brew_home)
+    os.chmod(brew, 0o755)
+    put("Cellar", "libfoo", "1.0", "lib.dylib", kb=300, root=brew_home)
+    cleaner.BREWS = (brew,)
+
+    def brew_says(command):
+        if "cleanup" in command and "-n" in command:
+            return 0, (f"Would remove: {brew_home}/Cellar/node/20.1.0 (2,014 files, 54.3MB)\n"
+                       f"Would remove: {cleaner.HOME}/Library/Caches/Homebrew/downloads/abc--node.tar.gz (12.0MB)\n"
+                       "==> This operation would free approximately 66.3MB of disk space.\n")
+        if "autoremove" in command and "-n" in command:
+            return 0, "==> Would autoremove 1 unneeded formula:\nlibfoo\n"
+        return 0, ""
+    with recording(Recorder(answer=brew_says)) as recorder:
+        homebrew = named(cleaner.scan_homebrew())
+    old_versions = homebrew["Homebrew old versions"]
+    assert old_versions["kb"] == cleaner.size_kb("54.3MB"), "Homebrew's downloads are counted under Dev tools"
+    assert old_versions["cmd"][-3:] == [brew, "cleanup", "--prune=all"] and old_versions["paths"] == []
+    assert "HOMEBREW_NO_AUTO_UPDATE=1" in old_versions["cmd"]
+    assert all("-n" in call for call in recorder.calls), "a scan only ever runs dry runs"
+    unneeded = homebrew["Homebrew packages nothing needs"]
+    assert unneeded["kb"] >= 300 and "libfoo" in unneeded["detail"] and unneeded["cmd"][-1] == "autoremove"
+    assert cleaner.blocked(unneeded, f"{brew_home}/Library/Homebrew/vendor/ruby {brew_home}/Library/Homebrew/brew.rb install x\n")
+    with recording(Recorder(answer=brew_says)) as recorder:
+        assert cleaner.delete(old_versions)["errors"] == []
+    assert recorder.calls == [old_versions["cmd"]]
+    cleaner.BREWS = ("/nonexistent/brew",)
+    assert cleaner.scan_homebrew() == []
+
+    # --- Docker leftovers, one row each, removed by Docker ----------------------------------------
+    docker = put("docker", kb=0, root=os.path.join(box, "fake-docker"))
+    os.chmod(docker, 0o755)
+    cleaner.DOCKERS = (docker,)
+    docker_up = [True]
+
+    def docker_says(command):
+        if not docker_up[0]:
+            return 1, ""
+        if command[1:3] == ["system", "df"] and "-v" not in command:
+            return 0, "Images\t3.1GB (50%)\nBuild Cache\t1.2GB\n"
+        if command[1:3] == ["ps", "-a"]:
+            return 0, ("8a83ec757c0c\tweb-db-1\tpostgres:17\t63MB (virtual 291MB)\tExited (0) 11 days ago\n"
+                       "887b83f57d24\tapi-1\tapi:latest\t0B (virtual 288MB)\tExited (137) 9 days ago\n")
+        if "-v" in command:
+            return 0, json.dumps([{"Name": "old_pgdata", "Links": "0", "Size": "48.4MB"},
+                                  {"Name": "live_pgdata", "Links": "1", "Size": "90MB"}])
+        return 0, ""
+    with recording(Recorder(answer=docker_says, fakes=[docker])) as recorder:
+        rows = named(cleaner.scan_docker())
+    assert {"Stopped container web-db-1", "Stopped container api-1", "Docker volume old_pgdata"} <= set(rows), rows.keys()
+    assert "Docker volume live_pgdata" not in rows, "a volume a container uses stays"
+    assert rows["Docker volume old_pgdata"]["group"] == "big" and "database" in rows["Docker volume old_pgdata"]["detail"]
+    assert rows["Stopped container api-1"]["tidy"] and rows["Stopped container web-db-1"]["kb"] == cleaner.size_kb("63MB")
+    with recording(Recorder(answer=docker_says, fakes=[docker])) as recorder:
+        cleaner.delete(rows["Stopped container web-db-1"])
+        cleaner.delete(rows["Docker volume old_pgdata"])
+    assert recorder.calls == [[docker, "rm", "8a83ec757c0c"], [docker, "volume", "rm", "old_pgdata"]], recorder.calls
+    docker_up[0] = False
+    with recording(Recorder(answer=docker_says, fakes=[docker])):
+        rows = cleaner.scan_docker()
+    assert [r["blocked"] for r in rows] == ["Start Docker to measure this"] * 2, "Docker off: no leftovers listed"
+
+    # --- duplicate files --------------------------------------------------------------------------
+    content = os.urandom(2 * 1024 * 1024)
+    different = content[:65536] + os.urandom(len(content) - 131072) + content[-65536:]   # same ends, other middle
+
+    def write_copy(path, data, days):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(data)
+        age(path, days)
+        return path
+    original = write_copy(os.path.join(cleaner.HOME, "Documents", "dupes", "a.bin"), content, 30)
+    older = write_copy(os.path.join(cleaner.HOME, "Desktop", "copy of a.bin"), content, 60)
+    newest = write_copy(os.path.join(cleaner.HOME, "Downloads", "a again.bin"), content, 1)
+    write_copy(os.path.join(cleaner.HOME, "Documents", "dupes", "b.bin"), different, 5)
+    cloud = write_copy(os.path.join(cleaner.HOME, "Documents", "dupes", "in iCloud.bin"), content, 5)
+    for hidden in (("Documents", "Photos.photoslibrary", "originals", "a.bin"), ("Documents", "proj", "node_modules", "a.bin"),
+                   ("Documents", "proj", ".git", "objects", "a.bin"), ("Documents", "Tool.app", "Contents", "a.bin")):
+        write_copy(os.path.join(cleaner.HOME, *hidden), content, 5)
+    os.symlink(original, os.path.join(cleaner.HOME, "Desktop", "link to a.bin"))
+    write_copy(os.path.join(cleaner.HOME, "Documents", "dupes", "small-1.txt"), b"x" * 1000, 5)
+    write_copy(os.path.join(cleaner.HOME, "Documents", "dupes", "small-2.txt"), b"x" * 1000, 5)
+    placeholder = os.stat(cloud).st_ino
+    cleaner.dataless = lambda info: info.st_ino == placeholder     # stands in for SF_DATALESS, which only iCloud sets
+    cleaner.find_dupes()
+    shown = cleaner.dupes_public()
+    assert len(shown["groups"]) == 1 and not shown["running"] and not shown["capped"], shown
+    group = shown["groups"][0]
+    assert sorted(f["name"] for f in group["files"]) == ["a again.bin", "a.bin", "copy of a.bin"], group
+    assert group["files"][0]["name"] == "a again.bin" and group["keep"] == group["files"][0]["id"], "keeps the newest"
+    assert shown["done"] == 3 * len(content) + 0 or shown["done"] >= 3 * len(content)
+    reads = []
+    real_read = cleaner.read_hash
+    cleaner.read_hash = lambda path, size, whole, progress=None: reads.append((path, whole)) or real_read(path, size, whole, progress)
+    cleaner.find_dupes()
+    assert reads == [] and len(cleaner.DUPES["groups"]) == 1, ("a second search reads nothing it already knows", reads[:4])
+    os.remove(os.path.join(cleaner.state_dir(), "hashes.json"))
+    cleaner.DUPE_CAP = 3 * 1024 * 1024
+    cleaner.find_dupes()
+    assert cleaner.DUPES["capped"] and sum(1 for _, whole in reads if whole) == 1, "stops reading at the cap"
+    cleaner.read_hash = real_read
+    cleaner.DUPE_CAP = 8 * 1000 ** 3
+    cleaner.find_dupes()
+    group = cleaner.dupes_public()["groups"][0]
+    with recording(Recorder()) as recorder:
+        out = cleaner.trash_extras([(group["id"], group["keep"])])
+    moved = sorted(call[3] for call in recorder.calls)
+    assert moved == sorted([original, older]) and out["moved"] == 2 and newest not in moved, (out, moved)
+    assert all(os.path.exists(p) for p in (original, older, newest)), "the recorder stood in for Finder"
+    assert cleaner.DUPES["groups"] == {}, "a group with one copy left is done"
+    cleaner.find_dupes()
+    group = cleaner.dupes_public()["groups"][0]
+    keep_path = next(f for f in group["files"] if f["id"] == group["keep"])["name"]
+    os.utime(newest, (time.time(), time.time() + 5))                                      # the copy to keep changed
+    with recording(Recorder()) as recorder:
+        out = cleaner.trash_extras([(group["id"], group["keep"])])
+    assert recorder.calls == [] and out["moved"] == 0 and "changed" in out["problems"][0], out
+    with recording(Recorder()) as recorder:
+        out = cleaner.trash_extras([("no-such-group", "x")])
+    assert recorder.calls == [] and out["problems"], out
+
+    # --- startup items ----------------------------------------------------------------------------
+    agents = os.path.join(cleaner.HOME, "Library", "LaunchAgents")
+    system_dir = os.path.join(box, "Library", "LaunchDaemons")
+    for folder, label, program in ((agents, "com.example.updater", "/Applications/Example.app/Contents/MacOS/Updater"),
+                                   (agents, "local.headroom.door", "/Applications/headroom.app/Contents/MacOS/headroom-app"),
+                                   (agents, "homebrew.mxcl.redis", "/opt/homebrew/opt/redis/bin/redis-server"),
+                                   (agents, "com.apple.hidden", "/usr/libexec/thing"),
+                                   (agents, "com.keeper.updater", "/Library/Keeper/updater"),          # same maker, not the app
+                                   (agents, "com.keeper.keep.helper", "/Library/Keeper/helper"),       # the app's own
+                                   (system_dir, "com.vendor.daemon", "/Library/Vendor/daemon")):
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, label + ".plist"), "wb") as handle:
+            plistlib.dump({"Label": label, "ProgramArguments": [program]}, handle)
+    real_dirs = cleaner.startup_dirs
+    cleaner.startup_dirs = lambda: ((agents, "user"), (system_dir, "system"))
+
+    def launchd_says(command):
+        if command[1:] == ["list"]:
+            return 0, "PID\tStatus\tLabel\n4242\t0\thomebrew.mxcl.redis\n-\t0\tlocal.headroom.door\n"
+        if command[1] == "print-disabled":
+            return 0, 'disabled services = {\n\t"com.example.updater" => disabled\n\t"local.headroom.door" => enabled\n}\n'
+        return 0, ""
+    with recording(Recorder(answer=launchd_says)) as recorder:
+        items = {i["label"]: i for i in cleaner.list_startup()}
+    assert {"com.example.updater", "com.vendor.daemon", "homebrew.mxcl.redis", "local.headroom.door"} <= set(items)
+    assert "com.apple.hidden" not in items, "Apple's own are left out unless asked for"
+    assert items["homebrew.mxcl.redis"]["state"] == "running" and items["local.headroom.door"]["state"] == "on"
+    assert items["com.example.updater"]["state"] == "off" and items["com.example.updater"]["app"] == "Example"
+    assert items["local.headroom.door"]["own"] == "headroom" and "headroom.localhost" in items["local.headroom.door"]["explain"]
+    assert items["com.vendor.daemon"]["scope"] == "system" and items["homebrew.mxcl.redis"]["app"] == "Homebrew"
+    assert items["com.keeper.keep.helper"]["app"] == "Keeper" and items["com.keeper.updater"]["app"] == "", \
+        "an app is named only when the agent is surely its own"
+    assert all(call[0] == "/bin/launchctl" and call[1] in ("list", "print-disabled") for call in recorder.calls)
+    with recording(Recorder(answer=launchd_says)):
+        assert "com.apple.hidden" in {i["label"] for i in cleaner.list_startup(apple=True)}
+        items = {i["label"]: i for i in cleaner.list_startup()}
+    uid = os.getuid()
+    with recording(Recorder(answer=launchd_says)) as recorder:
+        assert cleaner.switch_startup(items["homebrew.mxcl.redis"]["id"], False) == ""
+        assert "every user" in cleaner.switch_startup(items["com.vendor.daemon"]["id"], False)
+        assert cleaner.switch_startup(items["com.example.updater"]["id"], True) == ""
+        assert cleaner.switch_startup("no-such-item", True)
+    assert recorder.calls == [
+        ["/bin/launchctl", "bootout", f"gui/{uid}/homebrew.mxcl.redis"],
+        ["/bin/launchctl", "disable", f"gui/{uid}/homebrew.mxcl.redis"],
+        ["/bin/launchctl", "enable", f"gui/{uid}/com.example.updater"],
+        ["/bin/launchctl", "bootstrap", f"gui/{uid}", os.path.join(agents, "com.example.updater.plist")]], recorder.calls
+    assert cleaner.history()[1]["result"] == "turned-off" and os.path.exists(os.path.join(agents, "homebrew.mxcl.redis.plist"))
+    cleaner.startup_dirs = real_dirs
+
+    # --- reminders: the agent's check, with a stand-in for statfs ---------------------------------
+    assert cleaner.settings() == {"alert": True, "weekly": True, "alert_gb": 20}, "on by default, below 20 GB"
+    free = [12e9 / 1024]
+    cleaner.disk_free_kb = lambda: int(free[0])
+    measured = [3.2e9 / 1024]
+    cleaner.measure_safe = lambda: int(measured[0])
+    monday = time.mktime((2026, 10, 12, 11, 0, 0, 0, 0, -1))
+    assert cleaner.watch_check(monday) == [("Only 12.0 GB free", "Open headroom to make room.")]
+    free[0] = 11.5e9 / 1024
+    assert cleaner.watch_check(monday + 600) == [], "no nagging: once in six hours"
+    free[0] = 6.5e9 / 1024
+    assert cleaner.watch_check(monday + 1800)[0][0] == "Only 6.5 GB free", "unless 5 GB more went"
+    free[0] = 6.4e9 / 1024
+    assert cleaner.watch_check(monday + 3600) == []
+    assert len(cleaner.watch_check(monday + 1800 + 6 * 3600 + 1)) == 1, "and again after six hours"
+    free[0] = 80e9 / 1024
+    assert cleaner.watch_check(monday + 7 * 86400 - 3600) == [], "plenty of room, and the week isn't up"
+    assert cleaner.watch_check(monday + 7 * 86400) == [("Safe clean would free 3.2 GB",
+                                                        "Open headroom to clear it. Nothing goes until you say so.")]
+    assert cleaner.watch_check(monday + 7 * 86400 + 1800) == [], "weekly means weekly"
+    measured[0] = 100e6 / 1024
+    assert cleaner.watch_check(monday + 14 * 86400) == [], "under 500 MB isn't worth a notification"
+    night = time.mktime((2026, 11, 3, 3, 0, 0, 0, 0, -1))
+    measured[0] = 3.2e9 / 1024
+    assert cleaner.watch_check(night) == [], "a week is up, but not at three in the morning"
+    cleaner.save_state("settings.json", {"alert": False, "weekly": False, "alert_gb": 20})
+    free[0] = 1e9 / 1024
+    assert cleaner.watch_check(night + 7 * 3600) == []
+    samples = cleaner.space_history()["samples"]
+    assert len(samples) == 11 and samples[0] == [round(monday), int(12e9 / 1024)], samples[:2]
+    cleaner.save_state("settings.json", {"alert": True, "weekly": True, "alert_gb": 20})
+    printed = io.StringIO()
+    real_argv, real_nice = sys.argv, os.nice
+    sys.argv, os.nice = ["cleaner.py", "--watch"], lambda n: 0
+    cleaner.save_state("watch.json", {})
+    free[0] = 1.5e9 / 1024
+    with contextlib.redirect_stdout(printed):
+        cleaner.main()
+    sys.argv, os.nice = real_argv, real_nice
+    assert printed.getvalue() == "notify\tOnly 1.5 GB free\tOpen headroom to make room.\n", printed.getvalue()
+    # The agent itself, written and loaded by the server, and only for an installed app.
+    watch_plist = os.path.join(agents, cleaner.WATCH_LABEL + ".plist")
+    with recording(Recorder(returncode=1)) as recorder:
+        cleaner.sync_watch()
+    assert recorder.calls == [] and not os.path.exists(watch_plist), "no app launcher here: left alone"
+    cleaner.launcher_program = lambda: "/Applications/headroom.app/Contents/MacOS/headroom-app"
+    with recording(Recorder(returncode=1)) as recorder:
+        cleaner.sync_watch()
+    with open(watch_plist, "rb") as handle:
+        agent_plist = plistlib.load(handle)
+    assert agent_plist["ProgramArguments"] == ["/Applications/headroom.app/Contents/MacOS/headroom-app", "--watch"]
+    assert agent_plist["StartInterval"] == 1800 and agent_plist["ProcessType"] == "Background"
+    assert [c[1] for c in recorder.calls] == ["bootout", "bootstrap"], recorder.calls
+    cleaner.save_state("settings.json", {"alert": False, "weekly": False, "alert_gb": 20})
+    with recording(Recorder()) as recorder:
+        cleaner.sync_watch()
+    assert [c[1] for c in recorder.calls] == ["bootout"] and not os.path.exists(watch_plist), "both off: agent gone"
+    cleaner.save_state("settings.json", {"alert": True, "weekly": True, "alert_gb": 20})
+
+    # --- space history: deletes close together are one mark ---------------------------------------
+    marks = cleaner.space_history()["marks"]
+    assert marks and all(kb > 0 and n >= 1 for _, kb, n in marks), marks
+
     # --- the page's API: only this launch's page gets in ---------------------
     v4, v6 = cleaner.listen()
     assert v6 is not None and v6.server_port == v4.server_port
@@ -671,6 +937,12 @@ try:
     status, page, reply = call("/", cookie=None, run=None)
     assert status == 200 and cleaner.RUN.encode() in page and b"__RUN__" not in page
     assert call("/favicon.svg", cookie=None, run=None)[1].startswith(b"<svg")
+    # The tab icons can be cached (Safari shows a letter otherwise); nothing else can.
+    for icon_path in ("/favicon.svg", "/favicon-32.png", "/favicon.ico", "/apple-touch-icon.png"):
+        status, _, reply = call(icon_path, cookie=None, run=None)
+        assert status == 200 and reply.getheader("Cache-Control") == "public, max-age=604800", icon_path
+    assert call("/", cookie=None, run=None)[2].getheader("Cache-Control") == "no-store"
+    assert call("/api/start")[2].getheader("Cache-Control") == "no-store"
     assert call("/", host="evil.example:80", cookie=None, run=None)[0] == 403, "DNS rebinding gets nothing"
     # Typing headroom.localhost (or using a bookmark, or the port-80 door's redirect) opens a session;
     # a link or redirect from another site gets the page, which says to open headroom from Applications.
@@ -770,6 +1042,26 @@ try:
         assert call("/api/reveal", body={"id": "no-such-place"})[0] == 404
         assert call("/api/maintain", body={"id": "quicklook"})[1]["ok"]
     assert recorder.calls[0] == ["/usr/bin/open", "-R", os.path.join(cleaner.HOME, "Documents")], recorder.calls
+
+    # Duplicates, startup items and reminders over the API: ids only.
+    assert call("/api/dupes", body={})[0] == 200
+    for _ in range(100):
+        found = call("/api/dupes")[1]
+        if not found["running"]:
+            break
+        time.sleep(0.1)
+    assert len(found["groups"]) == 1 and "path" not in json.dumps(found["groups"]), found
+    assert call("/api/dupes/trash", body={"paths": ["/etc/hosts"]})[0] == 400
+    assert call("/api/dupes/trash", body={"groups": [{"id": "x", "keep": ["y"]}]})[0] == 400
+    assert call("/api/startup", body={"id": "x"})[0] == 400, "on or off must be said"
+    assert call("/api/settings")[1]["alert_gb"] == 20
+    with recording(Recorder()) as recorder:
+        assert call("/api/settings", body={"alert": False, "alert_gb": 15})[1] == {
+            "alert": False, "weekly": True, "alert_gb": 15, "available": True}
+        assert call("/api/settings", body={"alert_gb": 99999})[1]["alert_gb"] == 15, "a silly number is ignored"
+    assert recorder.calls and all(c[0] == "/bin/launchctl" for c in recorder.calls)
+    space = call("/api/space")[1]
+    assert space["samples"] and space["total_kb"] > 0
 
     # A tab closing mid-reply is not worth a traceback in the log.
     noise = io.StringIO()

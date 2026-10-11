@@ -13,7 +13,13 @@
 // Plain headroom.localhost (port 80) works too: a second agent holds port 80 and starts this
 // program with --door, which only redirects by name (headroom.localhost → :8460, harbor.localhost
 // → :8470) and exits when idle. harbor carries the same door, so either app can serve it.
+//
+// Reminders: an agent the server sets up (local.headroom.watch) starts this program with --watch
+// every half hour. It asks the server program what is worth saying (space running low, or what Safe
+// clean would free once a week), posts that as a notification, and exits. No Dock icon, and
+// nothing is ever deleted. Clicking a notification opens headroom's page.
 import AppKit
+import UserNotifications
 
 let label = "local.headroom.door"
 let port = "8460"
@@ -23,7 +29,7 @@ func launch_activate_socket(_ name: UnsafePointer<CChar>,
                             _ fds: UnsafeMutablePointer<UnsafeMutablePointer<Int32>?>,
                             _ count: UnsafeMutablePointer<Int>) -> Int32
 
-final class Shell: NSObject, NSApplicationDelegate {
+final class Shell: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private var server: pid_t = 0
     private var exitWatch: DispatchSourceProcess?
     private var reader: FileHandle?     // kept, or the pipe closes and the server's first line fails
@@ -31,6 +37,10 @@ final class Shell: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = mainMenu()
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        // macOS asks only the first time; after that this just reads the answer.
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
         let byLaunchd = CommandLine.arguments.contains("--launchd")
         if !byLaunchd, Door.install(), Door.handOver() {
             // launchd now starts the copy that owns the port; it opens the page.
@@ -63,13 +73,20 @@ final class Shell: NSObject, NSApplicationDelegate {
     }
 
     @objc func openPage() {
-        if let page {
+        if let page = page ?? URL(string: "http://headroom.localhost:\(port)/") {
             NSWorkspace.shared.open(page)
         }
     }
 
+    // A reminder was clicked: show the page. (If headroom wasn't running, opening it already does.)
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler done: @escaping () -> Void) {
+        openPage()
+        done()
+    }
+
     private func start(sockets: [Int32], openTab: Bool) -> Bool {
-        guard let (program, arguments) = serverCommand() else { return false }
+        guard let (program, arguments) = Shell.serverCommand() else { return false }
         var output: [Int32] = [0, 0]
         guard pipe(&output) == 0 else { return false }
         let log = open(NSHomeDirectory() + "/Library/Logs/headroom.log", O_WRONLY | O_CREAT | O_TRUNC, 0o600)
@@ -112,7 +129,7 @@ final class Shell: NSObject, NSApplicationDelegate {
     // The packaged app carries a frozen server beside this program; a source install runs
     // cleaner.py from Resources with the first real Python it finds. /usr/bin/python3 comes last:
     // it is an Xcode shim that can stall for minutes.
-    private func serverCommand() -> (String, [String])? {
+    static func serverCommand() -> (String, [String])? {
         let bundle = Bundle.main
         let frozen = bundle.bundleURL.appendingPathComponent("Contents/MacOS/headroom").path
         if FileManager.default.isExecutableFile(atPath: frozen) {
@@ -359,6 +376,41 @@ enum Spawn {
     }
 }
 
+// The reminder agent's half-hourly check.
+enum Watch {
+    static func run() -> Never {
+        guard let (program, arguments) = Shell.serverCommand() else { exit(1) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: program)
+        process.arguments = arguments + ["--watch"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { exit(1) }
+        let said = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let center = UNUserNotificationCenter.current()
+        let posted = DispatchGroup()
+        // Each line the server prints is "notify<TAB>title<TAB>text".
+        for line in String(decoding: said, as: UTF8.self).split(separator: "\n") {
+            let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard parts.count == 3, parts[0] == "notify" else { continue }
+            let content = UNMutableNotificationContent()
+            content.title = String(parts[1])
+            content.body = String(parts[2])
+            posted.enter()
+            center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)) { _ in
+                posted.leave()
+            }
+        }
+        _ = posted.wait(timeout: .now() + 15)
+        exit(0)
+    }
+}
+
+if CommandLine.arguments.contains("--watch") {
+    Watch.run()           // no Dock icon: check, maybe notify, exit
+}
 if CommandLine.arguments.contains("--door") {
     PortDoor.serve()      // no Dock icon, no app: just the redirect
 }

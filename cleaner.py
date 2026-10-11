@@ -124,7 +124,7 @@ FIREFOX_CACHES = ("cache2", "startupCache", "thumbnails", "jumpListCache", "shad
 # ~/Library/Caches folders the browser rows cover, so App caches leaves them out.
 BROWSER_CACHES = {"Google", "Firefox", "Arc", "company.thebrowser.Browser", "BraveSoftware", "Microsoft Edge"}
 
-INSTALLERS = (".dmg", ".pkg", ".mpkg", ".iso", ".xip")
+INSTALLERS = (".dmg", ".pkg", ".mpkg", ".iso", ".xip", ".ipsw")
 
 # Where apps leave things in ~/Library, named by bundle id, and what to call each place.
 TRACES = {
@@ -246,6 +246,7 @@ def item(group, name, paths, kb, detail="", cmd=None, quit=None, blocked=""):
         "recent": False,     # used in the last week: ticking the whole section leaves it out
         "safe": False,       # "Safe clean" may tick it
         "tidy": False,       # worth a line even under MIN_KB: clutter you'd still want gone
+        "trash": False,      # goes to the Trash through Finder, not straight off (your own data)
     }
 
 
@@ -702,7 +703,7 @@ def scan_docker():
             builds["kb"] = size_kb(reclaimable)
         elif kind == "Images":
             images["kb"] = size_kb(reclaimable)
-    return [builds, images]
+    return [builds, images] + docker_leftovers(docker)
 
 
 def ollama_rows():
@@ -975,7 +976,8 @@ def zipped_installer(path):
 def installer_places():
     # Homebrew's downloads are one row under Developer tool caches already.
     return [(home("Downloads"), 2), (home("Desktop"), 1),
-            (home("Library", "Containers", "com.apple.mail", "Data", "Library", "Mail Downloads"), 2)]
+            (home("Library", "Containers", "com.apple.mail", "Data", "Library", "Mail Downloads"), 2),
+            (home("Library", "iTunes"), 2)]           # iPhone/iPad Software Updates: .ipsw files
 
 
 def find_installers(wanted=None):
@@ -1211,6 +1213,120 @@ def scan_qbittorrent():
     return rows, notice
 
 
+# --- iPhone and iPad backups ------------------------------------------------------------------------
+
+def scan_backups():
+    """Device backups Finder made. Your data, so they go to the Trash, one row per device."""
+    shut, found = [], []
+    for path in listing(home("Library", "Application Support", "MobileSync", "Backup"), shut,
+                        "your iPhone and iPad backups"):
+        if os.path.isdir(path) and not os.path.islink(path):
+            try:
+                with open(os.path.join(path, "Info.plist"), "rb") as handle:
+                    info = plistlib.load(handle)
+            except Exception:
+                info = {}
+            found.append((path, info if isinstance(info, dict) else {}))
+    sizes = du([path for path, _ in found])
+    rows = []
+    for path, info in found:
+        device = str(info.get("Device Name") or info.get("Display Name") or "iPhone or iPad")
+        when = info.get("Last Backup Date")
+        facts = [str(info.get("Product Type") or "")]
+        if isinstance(when, datetime.datetime):
+            moment = calendar.timegm(when.utctimetuple())      # plists keep dates in UTC
+            facts.append(f"backed up {when.day} {when:%b %Y} ({ago(moment)})")
+        row = item("big", f"{device} backup", [path], sizes.get(path, 0),
+                   " · ".join(f for f in facts if f) + f" · {tilde(path)}",
+                   quit=("A backup is running. Wait for it to finish", [r"AppleMobileBackup"]))
+        row["trash"] = True
+        row["note"] = "Goes to the Trash. It may be your only copy of that device if it isn't in iCloud."
+        rows.append(row)
+    return rows, full_disk_access(shut) if shut else ""
+
+
+# --- Homebrew --------------------------------------------------------------------------------------
+
+BREWS = ("/opt/homebrew/bin/brew", "/usr/local/bin/brew")
+BREW_BUSY = ("Homebrew is busy. Wait for it to finish", [r"/Homebrew/brew\.rb", r"/bin/brew( |$)"])
+
+
+def brew_command(brew, *args):
+    # No self-update or hints: a dry run should only look.
+    return ["/usr/bin/env", "HOMEBREW_NO_AUTO_UPDATE=1", "HOMEBREW_NO_INSTALL_CLEANUP=1", "HOMEBREW_NO_ENV_HINTS=1",
+            brew, *args]
+
+
+def scan_homebrew():
+    """Old versions Homebrew keeps, and packages nothing needs any more. Homebrew lives outside
+    the home folder, so these rows run Homebrew's own commands; headroom deletes no paths."""
+    brew = next((b for b in BREWS if os.access(b, os.X_OK)), None)
+    if not brew:
+        return []
+    prefix = os.path.dirname(os.path.dirname(brew))
+    caches = home("Library", "Caches", "Homebrew") + os.sep     # already a row under Dev tools
+    rows = []
+    try:
+        cleanup = run(brew_command(brew, "cleanup", "-n", "--prune=all"), timeout=600)
+        autoremove = run(brew_command(brew, "autoremove", "-n"), timeout=300)
+    except (OSError, subprocess.TimeoutExpired):
+        return [item("dev", "Homebrew old versions", [], 0, prefix, blocked="Homebrew did not answer. Scan again later.")]
+    kb, found = 0, 0
+    for line in cleanup.stdout.splitlines():
+        match = re.match(r"^Would remove: (.+?) \((?:[\d,]+ files?, )?([\d.]+\s*[kKMGT]?B)\)$", line.strip())
+        if match and not match.group(1).startswith(caches):
+            kb, found = kb + size_kb(match.group(2).replace("K", "k")), found + 1
+    if found:
+        rows.append(item("dev", "Homebrew old versions", [], kb,
+                         f"{count(found, 'older version or leftover', 'older versions and leftovers')} Homebrew keeps. "
+                         f"The packages you use stay. {prefix}",
+                         cmd=brew_command(brew, "cleanup", "--prune=all"), quit=BREW_BUSY))
+    names, listing_started = [], False
+    for line in autoremove.stdout.splitlines():
+        if line.startswith("==> Would autoremove"):
+            listing_started = True
+        elif listing_started and re.match(r"^[\w@+.\-/]+$", line.strip()):
+            names.append(line.strip())
+    if names:
+        cellar = [os.path.join(prefix, "Cellar", n.rsplit("/", 1)[-1]) for n in names]
+        rows.append(item("dev", "Homebrew packages nothing needs", [], sum(du(cellar).values()),
+                         "Installed only for packages you've since removed: " + ", ".join(names[:8])
+                         + (f" and {len(names) - 8} more" if len(names) > 8 else ""),
+                         cmd=brew_command(brew, "autoremove"), quit=BREW_BUSY))
+    return rows
+
+
+def docker_leftovers(docker):
+    """Stopped containers and volumes no container uses, one row each. Docker removes them."""
+    rows = []
+    try:
+        stopped = run([docker, "ps", "-a", "--size", "-f", "status=exited",
+                       "--format", "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Size}}\t{{.Status}}"], timeout=30)
+        volumes = run([docker, "system", "df", "-v", "--format", "{{json .Volumes}}"], timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return rows
+    for line in stopped.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 5 and re.match(r"^[0-9a-f]{6,64}$", parts[0]):
+            ident, name, image, size, status = parts
+            row = item("big", f"Stopped container {name}", [], size_kb(size.split(" (")[0]),
+                       f"{image} · {status.lower()}. Its own changes go; the image stays.", cmd=[docker, "rm", ident])
+            row["tidy"] = True
+            rows.append(row)
+    try:
+        found = json.loads(volumes.stdout or "[]")
+    except ValueError:
+        found = []
+    for volume in found if isinstance(found, list) else []:
+        if isinstance(volume, dict) and str(volume.get("Links")) == "0" and re.match(r"^[\w.\-]+$", str(volume.get("Name"))):
+            row = item("big", f"Docker volume {volume['Name']}", [], size_kb(str(volume.get("Size", "0B"))),
+                       "No container uses it. A volume can hold a database: removing it deletes that data for good.",
+                       cmd=[docker, "volume", "rm", volume["Name"]])
+            row["tidy"] = True
+            rows.append(row)
+    return rows
+
+
 # --- leftovers of deleted apps -----------------------------------------------------------------
 
 def bundle_info(app):
@@ -1390,12 +1506,14 @@ SOURCES = {
     "sandboxed": (("apps",), scan_sandboxed),
     "leftovers": (("leftovers",), scan_leftovers),
     "qbittorrent": (("temp", "apps", "installers", "big"), scan_qbittorrent),
+    "backups": (("big",), scan_backups),
     "home_cache": (("dev",), scan_home_cache),
     "docker": (("dev", "big"), scan_docker),
     "big": (("big",), scan_big),
     "dev_tools": (("dev",), scan_dev_tools),
     "simulators": (("dev", "big"), scan_simulators),
     "builds": (("builds",), scan_builds),
+    "homebrew": (("dev",), scan_homebrew),      # slow: Homebrew's dry runs take a while
 }
 
 FOUND = {}   # source -> {id: row}. The only things a delete will touch.
@@ -1417,7 +1535,7 @@ def blocked(row, running):
 def public(row, running):
     return {"id": row["id"], "group": row["group"], "name": row["name"], "detail": row["detail"],
             "kb": row["kb"], "blocked": blocked(row, running), "note": row["note"],
-            "recent": row["recent"], "safe": row["safe"] or row["group"] in SAFE_GROUPS}
+            "recent": row["recent"], "safe": row["safe"] or row["group"] in SAFE_GROUPS, "trash": row["trash"]}
 
 
 # --- rows you asked never to see again, and what has gone ---------------------------------------
@@ -1615,6 +1733,12 @@ def delete(row):
             said = re.search(r"Total[^\n]*?([\d.]+\s*[kMGT]?B)", done.stdout)
         except (OSError, subprocess.TimeoutExpired):
             errors.append("The clean-up command did not finish.")
+    elif row["trash"]:
+        for path in row["paths"]:
+            why = "" if trashable(path) else f"Left alone, it is outside the folders this tool clears: {tilde(path)}"
+            why = why or finder_trash(path)
+            if why:
+                errors.append(why)
     else:
         allowed = []
         for path in row["paths"]:
@@ -1670,7 +1794,8 @@ def run_job(rows):
             result = {"freed_kb": 0, "left_kb": size, "errors": [error.strerror or str(error)]}
         finished.set()
         errors = result["errors"]
-        outcome = "failed" if errors and not result["freed_kb"] else "partly" if errors else "deleted"
+        outcome = "failed" if errors and not result["freed_kb"] else "partly" if errors else (
+            "trashed" if row["trash"] else "deleted")
         remember(row["name"], row["group"], row["paths"], result["freed_kb"], outcome,
                  errors[0] if errors else "", row["cmd"])
         JOB["results"].append({"id": row["id"], "name": row["name"], **result})
@@ -1964,6 +2089,432 @@ def explorer_trash(pid):
     return why
 
 
+# --- duplicate files -------------------------------------------------------------------------------
+
+DUPE_MIN = 1024 * 1024              # smaller files aren't worth the reading
+DUPE_CAP = 8 * 1000 ** 3            # bytes read in full per run; the cache carries the rest to the next
+SF_DATALESS = getattr(stat, "SF_DATALESS", 0x40000000)   # an iCloud placeholder: reading it downloads it
+PACKAGES = BUNDLE_SUFFIXES + (
+    ".photoslibrary", ".musiclibrary", ".imovielibrary", ".tvlibrary", ".fcpbundle", ".logicx", ".band",
+    ".pages", ".numbers", ".key", ".rtfd", ".bundle", ".plugin", ".kext", ".xcarchive", ".sparsebundle",
+    ".pkg", ".mpkg", ".lrdata", ".lrlibrary", ".aplibrary", ".playground", ".scptd", ".app")
+DUPES = {"running": False, "phase": "", "done": 0, "total": 0, "files": 0, "capped": False, "at": 0, "groups": {}}
+
+
+def dataless(info):
+    return bool(getattr(info, "st_flags", 0) & SF_DATALESS)
+
+
+def dupe_files():
+    """Files of 1 MB and up in Downloads, Desktop and Documents. Never inside apps, photo libraries
+    and other packages, .git or node_modules, never through symlinks, never iCloud placeholders."""
+    found = []
+    for root in (home("Downloads"), home("Desktop"), home("Documents")):
+        for folder, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_ANYWHERE
+                       and d not in PROJECT_DIRS and not d.lower().endswith(PACKAGES)]
+            for name in files:
+                path = os.path.join(folder, name)
+                try:
+                    info = os.lstat(path)
+                except OSError:
+                    continue
+                if stat.S_ISREG(info.st_mode) and info.st_size >= DUPE_MIN and not dataless(info) \
+                        and not name.startswith("."):
+                    found.append((path, info))
+    return found
+
+
+def read_hash(path, size, whole, progress=None):
+    """SHA-256 of the first and last 64 KB, or (whole) of everything."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        if not whole:
+            digest.update(handle.read(65536))
+            if size > 131072:
+                handle.seek(-65536, os.SEEK_END)
+                digest.update(handle.read(65536))
+            return digest.hexdigest()
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+            if progress:
+                progress(len(chunk))
+    return digest.hexdigest()
+
+
+def find_dupes():
+    """Same size, then the same first and last 64 KB, then the same SHA-256. Hashes are kept by
+    path, size and change time, so a second run only reads what changed."""
+    DUPES.update(running=True, phase="Listing files", done=0, total=0, files=0, capped=False, groups={})
+    try:
+        files = dupe_files()
+        DUPES["files"] = len(files)
+        by_size = {}
+        for path, info in files:
+            by_size.setdefault(info.st_size, []).append((path, info))
+        cache, fresh = load_state("hashes.json", {}), {}
+
+        def hashed(path, info, slot, work):
+            entry = fresh.get(path) or cache.get(path)
+            if not (isinstance(entry, list) and len(entry) == 4 and entry[:2] == [info.st_size, info.st_mtime_ns]):
+                entry = [info.st_size, info.st_mtime_ns, None, None]
+            if entry[slot] is None:
+                entry[slot] = work()
+            fresh[path] = entry
+            return entry[slot]
+
+        DUPES["phase"] = "Comparing the start and end of each file"
+        alike = {}
+        for size, same in by_size.items():
+            for path, info in same if len(same) > 1 else []:
+                try:
+                    key = hashed(path, info, 2, lambda: read_hash(path, size, False))
+                except OSError:
+                    continue
+                alike.setdefault((size, key), []).append((path, info))
+        candidates = [f for group in alike.values() if len(group) > 1 for f in group]
+        DUPES.update(phase="Reading candidates in full", total=sum(
+            i.st_size for p, i in candidates if not (isinstance(cache.get(p), list) and cache[p][3]
+                                                     and cache[p][:2] == [i.st_size, i.st_mtime_ns])))
+        budget = DUPE_CAP
+        same = {}
+        for path, info in candidates:
+            known = cache.get(path)
+            if not (isinstance(known, list) and known[:2] == [info.st_size, info.st_mtime_ns] and known[3]):
+                if info.st_size > budget:
+                    DUPES["capped"] = True      # left for the next run
+                    continue
+                budget -= info.st_size
+            try:
+                key = hashed(path, info, 3, lambda: read_hash(path, info.st_size, True,
+                                                              lambda n: DUPES.__setitem__("done", DUPES["done"] + n)))
+            except OSError:
+                continue
+            same.setdefault(key, []).append((path, info))
+        save_state("hashes.json", fresh)
+        groups = {}
+        for key, copies in same.items():
+            if len(copies) > 1:
+                gid = hashlib.sha1(key.encode()).hexdigest()[:16]
+                groups[gid] = {"size": copies[0][1].st_size, "files": {
+                    hashlib.sha1(p.encode()).hexdigest()[:16]: {"path": p, "size": i.st_size, "mtime": i.st_mtime_ns}
+                    for p, i in copies}}
+        DUPES["groups"] = groups
+    finally:
+        DUPES.update(running=False, phase="", at=time.time())
+
+
+def dupes_public():
+    groups = []
+    for gid, group in DUPES["groups"].items():
+        files = sorted(group["files"].items(), key=lambda kv: -kv[1]["mtime"])
+        groups.append({"id": gid, "kb": group["size"] // 1024, "keep": files[0][0], "files": [
+            {"id": fid, "name": os.path.basename(f["path"]), "folder": tilde(os.path.dirname(f["path"])),
+             "when": ago(f["mtime"] / 1e9)} for fid, f in files]})
+    groups.sort(key=lambda g: -g["kb"] * (len(g["files"]) - 1))
+    return {k: DUPES[k] for k in ("running", "phase", "done", "total", "files", "capped", "at")} | {"groups": groups[:300]}
+
+
+def unchanged(copy):
+    try:
+        info = os.lstat(copy["path"])
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_size == copy["size"] and info.st_mtime_ns == copy["mtime"]
+
+
+def trash_extras(choices):
+    """Move every copy but the kept one to the Trash, for each (group id, file id to keep). The kept
+    copy must still be there, unchanged, or nothing in that group moves."""
+    moved, freed, problems = 0, 0, []
+    for gid, keep in choices:
+        group = DUPES["groups"].get(gid)
+        if not group or keep not in group["files"]:
+            problems.append("Some of these are not in the last search. Search again.")
+            continue
+        if not unchanged(group["files"][keep]):
+            problems.append(f"{os.path.basename(group['files'][keep]['path'])} changed since the search, so its copies stay.")
+            continue
+        for fid, copy in list(group["files"].items()):
+            if fid == keep:
+                continue
+            why = "" if unchanged(copy) else "It changed since the search."
+            why = why or ("" if can_trash(copy["path"]) else "It is outside the folders headroom moves.")
+            why = why or finder_trash(copy["path"])
+            remember(os.path.basename(copy["path"]), "duplicates", [copy["path"]], 0 if why else copy["size"] // 1024,
+                     "failed" if why else "trashed", why)
+            if why:
+                problems.append(f"{os.path.basename(copy['path'])}: {why}")
+            else:
+                moved, freed = moved + 1, freed + copy["size"] // 1024
+                del group["files"][fid]
+        if len(group["files"]) < 2:
+            DUPES["groups"].pop(gid, None)
+    return {"moved": moved, "freed_kb": freed, "problems": problems[:5]}
+
+
+# --- startup items ------------------------------------------------------------------------------------
+
+STARTUP = {}    # id -> the item the last listing showed: the only ones that can be switched
+OWN_AGENTS = {"local.headroom.door": "headroom", "local.headroom.watch": "headroom",
+              "local.localhost.door": "headroom and harbor", "local.harbor": "harbor"}
+EXPLAIN = (     # label prefix -> what it does, in one line
+    ("local.headroom.door", "Lets you open headroom by typing headroom.localhost:8460."),
+    ("local.headroom.watch", "Checks free space every half hour, and reminds you about Safe clean."),
+    ("local.localhost.door", "Lets plain headroom.localhost and harbor.localhost open their apps."),
+    ("local.harbor", "Starts harbor."),
+    ("homebrew.mxcl.", "Starts a Homebrew service at login."),
+    ("com.google.keystone", "Keeps Google apps such as Chrome up to date."),
+    ("com.google.GoogleUpdater", "Keeps Google apps such as Chrome up to date."),
+    ("com.microsoft.update", "Keeps Microsoft Office up to date."),
+    ("com.microsoft.autoupdate", "Keeps Microsoft Office up to date."),
+    ("com.microsoft.OneDriveStandaloneUpdater", "Keeps OneDrive up to date."),
+    ("com.adobe.ARMDC", "Keeps Adobe Acrobat up to date."),
+    ("us.zoom", "Keeps Zoom up to date."),
+    ("com.docker", "Lets Docker run containers and their networking."),
+    ("com.grammarly", "Runs and updates Grammarly."),
+    ("com.fortinet", "FortiClient's VPN and security agent."),
+    ("com.kaspersky", "Kaspersky's antivirus."),
+    ("org.gpgtools", "GPG Suite's helpers for encrypted mail."),
+    ("com.oracle.java.Java-Updater", "Checks for Java updates."),
+    ("org.xquartz", "Starts XQuartz for X11 apps."),
+    ("com.mathworks", "MATLAB's background service."),
+    ("jp.co.canon", "Canon's scanner helper."),
+    ("com.autodesk", "Autodesk's licensing service."),
+    ("com.teamviewer", "TeamViewer's remote access."),
+    ("com.dropbox", "Keeps Dropbox running and up to date."),
+)
+
+
+def launchctl(*args):
+    return run(["/bin/launchctl", *args], timeout=30)
+
+
+def startup_dirs():
+    return ((home("Library", "LaunchAgents"), "user"), ("/Library/LaunchAgents", "system"),
+            ("/Library/LaunchDaemons", "system"))
+
+
+def list_startup(apple=False):
+    domain = f"gui/{os.getuid()}"
+    loaded = {}
+    for line in launchctl("list").stdout.splitlines()[1:]:
+        parts = line.split("\t")
+        if len(parts) == 3:
+            loaded[parts[2]] = parts[0] != "-"
+    disabled = dict(re.findall(r'^\s*"([^"]+)" => (disabled|enabled)', launchctl("print-disabled", domain).stdout, re.M))
+    running = {os.path.realpath(p) for p in program_paths()}
+    apps = {ident: os.path.basename(path)[:-len(".app")] for ident, path in installed_apps().items()}
+    STARTUP.clear()
+    out = []
+    for folder, scope in startup_dirs():
+        for plist in children(folder):
+            if not plist.endswith(".plist"):
+                continue
+            try:
+                with open(plist, "rb") as handle:
+                    info = plistlib.load(handle)
+            except Exception:
+                continue
+            if not isinstance(info, dict):
+                continue
+            label = info.get("Label") if isinstance(info.get("Label"), str) else os.path.basename(plist)[:-6]
+            if label.startswith("com.apple.") and not apple:
+                continue
+            program = info.get("Program") or next(iter(info.get("ProgramArguments") or []), "")
+            program = program if isinstance(program, str) else ""
+            app = re.search(r"([^/]+)\.app/", program)
+            # The app it belongs to: from its program's path, or an installed app whose id starts the
+            # label. Never just the maker: Google has many apps, and guessing names the wrong one.
+            owner = app.group(1) if app else next((apps[i] for i in sorted(apps, key=len, reverse=True)
+                                                   if label.lower() == i or label.lower().startswith(i + ".")), "")
+            owner = OWN_AGENTS.get(label, owner) or ("Homebrew" if label.startswith("homebrew.") else "")
+            if scope == "user":
+                state = "off" if disabled.get(label) == "disabled" else (
+                    "running" if loaded.get(label) else "on" if label in loaded else "not loaded")
+            else:
+                state = "running" if program and os.path.realpath(program) in running else ""
+            sid = hashlib.sha1(plist.encode()).hexdigest()[:16]
+            STARTUP[sid] = {"label": label, "plist": plist, "scope": scope}
+            out.append({"id": sid, "label": label, "program": tilde(program), "app": owner, "scope": scope,
+                        "state": state, "own": OWN_AGENTS.get(label, ""),
+                        "explain": next((text for prefix, text in EXPLAIN if label.startswith(prefix)),
+                                        "Checks for updates." if "updat" in label.lower() else "")})
+    out.sort(key=lambda i: (i["scope"] != "user", i["app"].lower() or "~", i["label"].lower()))
+    return out
+
+
+def switch_startup(sid, on):
+    """Turn one of your own launch agents off (unload it, and keep it from loading at login) or on
+    again. Reversible both ways; the plist stays where it is. Agents for every user stay read-only."""
+    entry = STARTUP.get(sid)
+    if not entry:
+        return "List the startup items again."
+    if entry["scope"] != "user":
+        return "This one starts for every user on this Mac, so headroom only shows it."
+    domain = f"gui/{os.getuid()}"
+    target = f"{domain}/{entry['label']}"
+    if on:
+        done = launchctl("enable", target)
+        if done.returncode == 0:
+            launchctl("bootstrap", domain, entry["plist"])     # already loaded is fine
+    else:
+        launchctl("bootout", target)                          # not loaded is fine
+        done = launchctl("disable", target)
+    why = "" if done.returncode == 0 else first_line(done.stderr) or "launchctl refused."
+    remember(entry["label"], "startup", [entry["plist"]], 0, ("turned-on" if on else "turned-off") if not why else "failed", why)
+    return why
+
+
+# --- reminders: low space, and a weekly Safe clean --------------------------------------------------
+
+WATCH_LABEL = "local.headroom.watch"
+
+
+def settings():
+    saved = load_state("settings.json", {})
+    saved = saved if isinstance(saved, dict) else {}
+    gb = saved.get("alert_gb", 20)
+    return {"alert": saved.get("alert", True) is not False, "weekly": saved.get("weekly", True) is not False,
+            "alert_gb": gb if isinstance(gb, int) and 1 <= gb <= 1000 else 20}
+
+
+def launcher_program():
+    """The app's own launcher, which can post notifications. None when headroom isn't running
+    from an app (./run.sh, the tests): then reminders are left alone."""
+    for candidate in (os.path.join(HERE, "..", "MacOS", "headroom-app"),
+                      os.path.join(os.path.dirname(sys.executable), "headroom-app")):
+        if os.access(candidate, os.X_OK):
+            return os.path.realpath(candidate)
+    return None
+
+
+def sync_watch():
+    """Install, update or remove the agent that runs the reminders, to match the settings."""
+    program = launcher_program()
+    if not program:
+        return
+    domain, path = f"gui/{os.getuid()}", home("Library", "LaunchAgents", WATCH_LABEL + ".plist")
+    wanted_on = settings()["alert"] or settings()["weekly"]
+    wanted = {"Label": WATCH_LABEL, "ProgramArguments": [program, "--watch"], "StartInterval": 1800,
+              "ProcessType": "Background", "LowPriorityIO": True, "Nice": 10}
+    try:
+        with open(path, "rb") as handle:
+            current = plistlib.load(handle)
+    except Exception:
+        current = None
+    if not wanted_on:
+        if current is not None:
+            launchctl("bootout", f"{domain}/{WATCH_LABEL}")
+            os.remove(path)
+        return
+    if current == wanted and launchctl("print", f"{domain}/{WATCH_LABEL}").returncode == 0:
+        return
+    launchctl("bootout", f"{domain}/{WATCH_LABEL}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        plistlib.dump(wanted, handle)
+    launchctl("bootstrap", domain, path)
+
+
+def size_text(kb):
+    """Sizes the way the page shows them: powers of ten, like Finder."""
+    bytes_ = max(kb, 0) * 1024
+    return f"{bytes_ / 1e9:.1f} GB" if bytes_ >= 1e9 else f"{round(bytes_ / 1e6)} MB" if bytes_ >= 1e6 else f"{round(bytes_ / 1e3)} KB"
+
+
+def disk_free_kb():
+    return shutil.disk_usage(HOME).free // 1024     # one statfs
+
+
+def add_sample(free_kb, when=None):
+    """One free-space reading for the History chart. The file is trimmed when it grows past ~400 KB."""
+    path = os.path.join(state_dir(), "space.jsonl")
+    with STATE_LOCK:
+        try:
+            os.makedirs(state_dir(), exist_ok=True)
+            with open(path, "a") as handle:
+                handle.write(json.dumps({"t": round(when or time.time()), "free": free_kb}) + "\n")
+            if os.path.getsize(path) > 400_000:
+                with open(path) as handle:
+                    keep = handle.readlines()[-6000:]
+                with open(path, "w") as handle:
+                    handle.writelines(keep)
+        except OSError:
+            pass
+
+
+SAFE_SOURCES = ("caches", "app_data", "app_extras", "sandboxed", "logs", "temp", "installers", "qbittorrent")
+
+
+def measure_safe():
+    """What Safe clean would free right now: the safe rows of the quick sources, as the page picks them."""
+    running, total = processes(), 0
+    for source in SAFE_SOURCES:
+        found = SOURCES[source][1]()
+        rows = found[0] if isinstance(found, tuple) else found
+        total += sum(r["kb"] for r in unprotected(rows) if (r["safe"] or r["group"] in SAFE_GROUPS)
+                     and not r["recent"] and r["kb"] >= MIN_KB and not blocked(r, running))
+    return total
+
+
+def watch_check(now=None):
+    """The agent's half-hourly check: one free-space reading, and the notifications worth sending.
+    Never deletes anything."""
+    now = now or time.time()
+    chosen, free = settings(), disk_free_kb()
+    add_sample(free, now)
+    state = load_state("watch.json", {})
+    state = state if isinstance(state, dict) else {}
+    notes = []
+    if chosen["alert"] and free * 1024 < chosen["alert_gb"] * 1e9:
+        # At most once in six hours, unless another 5 GB has gone since the last one.
+        last_at, last_free = state.get("alert_at", 0), state.get("alert_free")
+        if now - last_at >= 6 * 3600 or (isinstance(last_free, int) and free * 1024 <= last_free * 1024 - 5e9):
+            notes.append((f"Only {size_text(free)} free", "Open headroom to make room."))
+            state.update(alert_at=now, alert_free=free)
+    if chosen["weekly"]:
+        last = state.get("weekly_at")
+        if not isinstance(last, (int, float)):
+            state["weekly_at"] = now                     # the first week starts now
+        elif now - last >= 7 * DAY and 10 <= time.localtime(now).tm_hour < 20:
+            state["weekly_at"] = now
+            kb = measure_safe()
+            if kb * 1024 >= 500e6:
+                notes.append((f"Safe clean would free {size_text(kb)}",
+                              "Open headroom to clear it. Nothing goes until you say so."))
+    save_state("watch.json", state)
+    return notes
+
+
+def space_history():
+    """Free space over time, and the moments headroom freed some (deletes close together count as one)."""
+    samples = []
+    try:
+        with open(os.path.join(state_dir(), "space.jsonl")) as handle:
+            for line in collections.deque(handle, maxlen=6000):
+                try:
+                    entry = json.loads(line)
+                    samples.append([int(entry["t"]), int(entry["free"])])
+                except (ValueError, KeyError, TypeError):
+                    continue
+    except OSError:
+        pass
+    marks = []
+    for entry in reversed(history(limit=3000)):
+        if entry.get("result") not in ("deleted", "trashed", "partly") or not entry.get("kb"):
+            continue
+        try:
+            when = datetime.datetime.fromisoformat(str(entry["at"])).timestamp()
+        except (KeyError, ValueError):
+            continue
+        if marks and when - marks[-1][0] < 15 * 60:
+            marks[-1] = [when, marks[-1][1] + int(entry["kb"]), marks[-1][2] + 1]
+        else:
+            marks.append([when, int(entry["kb"]), 1])
+    return {"samples": sorted(samples), "marks": [[round(t), kb, n] for t, kb, n in marks], "total_kb": disk()["total_kb"]}
+
+
 # --- maintenance ------------------------------------------------------------------------------------
 
 # task -> (needs an administrator, the work). Admin work goes through macOS's own password dialog
@@ -2012,6 +2563,11 @@ def watchdog():
             os._exit(0)
 
 
+# The tab icons may be kept for a week: with no-store, Safari has nothing to show and draws a letter.
+# Everything else stays no-store.
+ICON_CACHE = {"Cache-Control": "public, max-age=604800"}
+
+
 def payload(body):
     try:
         data = json.loads(body)
@@ -2029,12 +2585,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        headers = dict(headers or {})
+        self.send_header("Cache-Control", headers.pop("Cache-Control", "no-store"))
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Security-Policy",
                          "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
                          "img-src 'self'; connect-src 'self'; frame-ancestors 'none'")
-        for key, value in (headers or {}).items():
+        for key, value in headers.items():
             self.send_header(key, value)
         self.end_headers()
         self.wfile.write(data)
@@ -2104,20 +2661,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, page.read().replace(b"__RUN__", RUN.encode()), "text/html; charset=utf-8",
                                   headers)
         if url.path == "/favicon.svg" and self.local():
-            return self.reply(200, ICON.encode(), "image/svg+xml")
+            return self.reply(200, ICON.encode(), "image/svg+xml", ICON_CACHE)
         # Safari's tab bar skips SVG icons and shows a letter instead, so offer PNGs too.
         pngs = {"/favicon-32.png": "favicon-32.png", "/favicon.ico": "favicon-32.png",
                 "/apple-touch-icon.png": "apple-touch-icon.png"}
         if url.path in pngs and self.local():
             try:
                 with open(os.path.join(HERE, pngs[url.path]), "rb") as icon:
-                    return self.reply(200, icon.read(), "image/png")
+                    return self.reply(200, icon.read(), "image/png", ICON_CACHE)
             except OSError:
                 return self.reply(404, b"", "text/plain")
         if not self.allowed():
             return
         DEADLINE = time.time() + IDLE
         if url.path == "/api/start":
+            add_sample(disk()["free_kb"])           # one reading per scan, for the History chart
             sources = [{"id": name, "groups": list(groups)} for name, (groups, _) in SOURCES.items()]
             return self.reply(200, {"sources": sources, "disk": disk(), "last": last_scan()})
         if url.path == "/api/progress":
@@ -2148,6 +2706,14 @@ class Handler(BaseHTTPRequestHandler):
             if found is None:
                 return self.reply(404, {"error": "That folder is not in the last listing. Go back to the top."})
             return self.reply(200, found)
+        if url.path == "/api/dupes":
+            return self.reply(200, dupes_public())
+        if url.path == "/api/startup":
+            return self.reply(200, {"items": list_startup(query.get("apple", [""])[0] == "1")})
+        if url.path == "/api/settings":
+            return self.reply(200, {**settings(), "available": launcher_program() is not None})
+        if url.path == "/api/space":
+            return self.reply(200, space_history())
         if url.path == "/api/ping":
             return self.reply(200, {})
         self.reply(404, {"error": "not found"})
@@ -2184,8 +2750,33 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/stop":
             JOB["stopping"] = True     # finishes the row it is on, then stops
             return self.reply(200, {})
+        if self.path == "/api/dupes":
+            with LOCK:
+                busy, DUPES["running"] = DUPES["running"], True
+            if not busy:
+                threading.Thread(target=find_dupes, daemon=True).start()
+            return self.reply(200, {"started": not busy})
+        if self.path == "/api/dupes/trash":
+            picks = data.get("groups")
+            if not isinstance(picks, list) or not picks or not all(
+                    isinstance(p, dict) and isinstance(p.get("id"), str) and isinstance(p.get("keep"), str) for p in picks):
+                return self.reply(400, {"error": "Send the groups and the copy to keep in each."})
+            return self.reply(200, trash_extras([(p["id"], p["keep"]) for p in picks]))
+        if self.path == "/api/settings":
+            current = settings()
+            for key in ("alert", "weekly"):
+                if isinstance(data.get(key), bool):
+                    current[key] = data[key]
+            if isinstance(data.get("alert_gb"), int) and 1 <= data["alert_gb"] <= 1000:
+                current["alert_gb"] = data["alert_gb"]
+            save_state("settings.json", current)
+            try:
+                sync_watch()
+            except OSError as error:
+                return self.reply(500, {"error": error.strerror or str(error)})
+            return self.reply(200, {**settings(), "available": launcher_program() is not None})
         if not wanted and self.path in ("/api/protect", "/api/unprotect", "/api/uninstall",
-                                        "/api/reveal", "/api/trash", "/api/maintain"):
+                                        "/api/reveal", "/api/trash", "/api/maintain", "/api/startup"):
             return self.reply(400, {"error": "Send the id of what to act on."})
         if self.path == "/api/protect":
             with LOCK:
@@ -2212,6 +2803,10 @@ class Handler(BaseHTTPRequestHandler):
             if why is None:
                 return self.reply(404, {"error": "List this folder again."})
             return self.reply(200, {"error": why})
+        if self.path == "/api/startup":
+            if not isinstance(data.get("on"), bool):
+                return self.reply(400, {"error": "Say whether to turn it on or off."})
+            return self.reply(200, {"error": switch_startup(wanted, data["on"])})
         if self.path == "/api/maintain":
             if wanted not in MAINTENANCE:
                 return self.reply(404, {"error": "No such task."})
@@ -2272,6 +2867,12 @@ def inherited():
 
 
 def main():
+    if "--watch" in sys.argv:
+        # Run by the reminder agent through the app's launcher, which posts what this prints.
+        os.nice(10)
+        for title, body in watch_check():
+            print(f"notify\t{title}\t{body}", flush=True)
+        return
     if "--detach" in sys.argv or (FROZEN and "--serve" not in sys.argv):
         # Started by the app in Applications. Hand over to a copy that outlives the launcher,
         # so the app counts as closed and can be opened again while a tab is still up.
@@ -2286,6 +2887,7 @@ def main():
     url = f"http://{NAME if ipv6 else '127.0.0.1'}:{servers[0].server_port}/?k={TOKEN}"
     print("headroom is open at", url, flush=True)
     threading.Thread(target=watchdog, daemon=True).start()
+    threading.Thread(target=sync_watch, daemon=True).start()     # reminders are on unless turned off
     for server in servers[1:]:
         threading.Thread(target=server.serve_forever, daemon=True).start()
     if "--no-open" not in sys.argv:

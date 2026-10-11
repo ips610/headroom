@@ -2,7 +2,8 @@
 
 My Mac ran out of space, so I made this to see what was eating it and clear the junk safely.
 headroom finds caches and leftover files, shows how much space each one takes, and deletes
-only what you tick. It can also uninstall apps, show you what's big, and run a few macOS fixes.
+only what you tick. It can also uninstall apps, find what's big or duplicated, show what starts
+up with your Mac, run a few macOS fixes, and tell you when space runs low.
 
 It runs as a small page in your browser at `headroom.localhost`. Nothing leaves your Mac, and
 nothing gets deleted until you confirm.
@@ -46,7 +47,9 @@ app. If you ever want all that gone:
 ```sh
 launchctl bootout gui/$(id -u)/local.headroom.door
 launchctl bootout gui/$(id -u)/local.localhost.door
-rm ~/Library/LaunchAgents/local.headroom.door.plist ~/Library/LaunchAgents/local.localhost.door.plist
+launchctl bootout gui/$(id -u)/local.headroom.watch
+rm ~/Library/LaunchAgents/local.headroom.door.plist ~/Library/LaunchAgents/local.localhost.door.plist \
+   ~/Library/LaunchAgents/local.headroom.watch.plist
 ```
 
 The first scan may ask for access to Desktop, Documents and Downloads. That's how it finds
@@ -59,10 +62,21 @@ section; tick them one by one if you really mean it.
 Don't want a row offered again? Hover it and press **Never offer**. It moves to "Never
 offered" at the bottom of the list, where you can bring it back.
 
+The page comes in Light and Dark. **Auto · Light · Dark** sits at the top right; Auto follows
+your Mac.
+
+### Reminders
+
+headroom tells you when free space drops below 20 GB, and once a week, if Safe clean would
+free 500 MB or more, it says how much. It checks every half hour in the background, never
+repeats itself within six hours unless another 5 GB went, and never deletes anything on its
+own. The first time you open headroom, macOS asks whether it may send notifications. Click one
+and headroom opens. You can turn either reminder off, or change the 20 GB, under Maintenance.
+
 ### Full Disk Access
 
-macOS keeps the Trash, Safari's and Chrome's caches and the caches inside sandboxed apps
-(WhatsApp, Zoom, Teams…) behind Full Disk Access. If you want headroom to clear those, open
+macOS keeps the Trash, Safari's and Chrome's caches, the caches inside sandboxed apps
+(WhatsApp, Zoom, Teams…) and your iPhone and iPad backups behind Full Disk Access. If you want headroom to clear those, open
 System Settings → Privacy & Security → Full Disk Access, switch on headroom (add it from
 Applications with + if it isn't there), then quit and reopen headroom. Without it, headroom
 just tells you what it couldn't see.
@@ -74,11 +88,11 @@ just tells you what it couldn't see.
 | Trash and browser caches | the Trash, and the cache folders of Safari, Chrome, Firefox, Arc, Brave and Edge (never history, logins or cookies) |
 | App caches | everything in `~/Library/Caches`, the cache folders of apps like Slack, VS Code and Notion, caches inside sandboxed apps, Spotify's and Adobe's media caches, qBittorrent's location database |
 | Logs and temporary files | `~/Library/Logs`, qBittorrent's logs, and temp files nobody has touched for a day |
-| Installer files | `.dmg`, `.pkg`, `.iso`, `.xip` and zipped apps in Downloads and on the Desktop, and `.torrent` files you've already added to qBittorrent or that are over a month old |
-| Developer tool caches | npm, Bun, Gradle, Maven, NuGet, gems, pub, Cargo, rustup, uv, Conda, Deno, Expo, Unity, Arduino, Go modules, Flutter, Xcode DerivedData, old simulators and the caches inside shut-down ones, Docker build cache, old VS Code / Cursor / Windsurf extension versions, `~/.cache` |
+| Installer files | `.dmg`, `.pkg`, `.iso`, `.xip` and zipped apps in Downloads and on the Desktop, iPhone and iPad updates (`.ipsw`), and `.torrent` files you've already added to qBittorrent or that are over a month old |
+| Developer tool caches | npm, Bun, Gradle, Maven, NuGet, gems, pub, Cargo, rustup, uv, Conda, Deno, Expo, Unity, Arduino, Go modules, Flutter, Xcode DerivedData, old simulators and the caches inside shut-down ones, Docker build cache, Homebrew's old versions and packages nothing needs, old VS Code / Cursor / Windsurf extension versions, `~/.cache` |
 | Project build folders | `node_modules`, `.next`, `dist`, Rust `target`, Swift `.build`, Flutter `build` and `.dart_tool` |
 | Leftovers of deleted apps | settings, caches, saved windows, containers and launch agents of apps that aren't on your Mac any more |
-| Emulators, models and big downloads | Android emulators and system images, iOS simulators, Ollama and LM Studio models, unused Docker images, Xcode archives, unfinished downloads of torrents you removed from qBittorrent |
+| Backups, emulators and big downloads | iPhone and iPad backups (these go to the Trash, since one may be your only copy), Android emulators and system images, iOS simulators, Ollama and LM Studio models, unused Docker images, stopped Docker containers and volumes no container uses, Xcode archives, unfinished downloads of torrents you removed from qBittorrent |
 
 The last two aren't really cache. They won't come back on their own, so headroom keeps them
 apart and warns you before deleting them.
@@ -89,18 +103,24 @@ apart and warns you before deleting them.
   in your Library. Uninstalling moves the app and those files to the Trash, so you can change
   your mind. Apple's apps aren't listed, and an app has to be closed first.
 - **Disk** shows the biggest folders in your home folder and Applications (click one to look
-  inside), your largest files, and downloads you haven't touched in 90 days. You can show
-  anything in Finder or move it to the Trash.
+  inside), your largest files, downloads you haven't touched in 90 days, and duplicate files in
+  Downloads, Desktop and Documents. You can show anything in Finder or move it to the Trash. For
+  duplicates it keeps the newest copy unless you pick another, and skips files that live only in
+  iCloud so nothing downloads.
+- **Startup** lists what starts with your Mac or when you log in: your own launch agents and the
+  ones for every user. You can turn your own off and on again; the others are shown only.
 - **Maintenance** refreshes Quick Look, flushes DNS, rebuilds the icon cache or the Spotlight
   index. The ones that need your password ask through macOS's own dialog; headroom never
   sees it. Rebuilding Spotlight takes hours, so it asks first.
-- **History** lists everything headroom deleted or moved to the Trash, with when, what and
-  where. It's kept in `~/Library/Logs/headroom/history.jsonl`.
+- **Maintenance** also holds the two reminders.
+- **History** shows a chart of free space over time, with a dot wherever headroom freed some,
+  and lists everything it deleted or moved to the Trash, with when, what and where. It's kept
+  in `~/Library/Logs/headroom/history.jsonl`.
 
 ## What it won't touch
 
 Your actual app data (settings, chats, local storage) unless you uninstall the app or it's a
-deleted app's leftovers, Docker volumes, virtualenvs, Apple's own caches and apps, and any
+deleted app's leftovers, Docker volumes a container still uses, virtualenvs, Apple's own caches and apps, and any
 build folder that doesn't sit next to the file that proves what it is (`package.json`,
 `Cargo.toml`, `Package.swift`, `pubspec.yaml`). If git tracks files in a build folder, it's
 left alone. A deleted app's leftovers only show up when headroom is sure the app is gone.
