@@ -11,21 +11,63 @@ whether there's a new version.
 
 ![headroom finding 79.3 GB to clear, in dark mode, with its eight sections and a Safe clean button](docs/screenshots/clean-dark.png)
 
-## Download
+## Getting started
 
-Get the zip for your Mac from the [Releases page](https://github.com/ips610/headroom/releases/latest):
+You don't need Python or anything else, just macOS 12 or newer.
 
-- `headroom-apple-silicon.zip` for M1 and newer
-- `headroom-intel.zip` for Intel Macs
+1. **Check which Mac you have.** Apple menu → About This Mac. If it says "Chip" (Apple M1, M2…)
+   you have Apple Silicon. If it says "Processor" (Intel Core…) you have Intel.
+2. **Download the zip** from the [latest release](https://github.com/ips610/headroom/releases/latest),
+   under Assets:
+   - `headroom-apple-silicon.zip` for Apple Silicon
+   - `headroom-intel.zip` for Intel
+3. **Unzip it.** Safari does this by itself. Otherwise double-click the zip in Downloads. You get
+   `headroom.app`.
+4. **Move it to Applications.** Drag `headroom.app` onto Applications in the Finder sidebar. Don't
+   run it from Downloads: the reminders and the `headroom.localhost` address are only set up
+   when it runs from Applications.
+5. **Open it the first time.** Double-click headroom in Applications. macOS says it can't check
+   the app for malware, because I haven't paid Apple to notarise it. Click **Done** (not Move to
+   Trash). Then open System Settings → Privacy & Security, scroll down to Security, and next to
+   "headroom was blocked" click **Open Anyway**. Enter your password and click **Open Anyway**
+   once more. You only do this once per download.
+6. **Allow what it asks for.** headroom opens a page in your browser. macOS asks whether
+   headroom may read Desktop, Documents and Downloads (that's where it finds build folders and
+   old installers) and whether it may send notifications. Allow both. macOS may also say it
+   added background items: those are the small helpers that make `headroom.localhost` and the
+   reminders work. If you want headroom to clear the Trash, Safari's cache and the caches of apps
+   like WhatsApp, also give it [Full Disk Access](#full-disk-access).
+7. **Clean.** Wait for the scan, then press **Safe clean** for the easy wins, or tick what you
+   want and press Delete. Nothing goes until you confirm.
 
-Not sure which one you have? Apple menu → About This Mac. If it says "Chip", get Apple
-Silicon. If it says "Processor", get Intel.
+After that, open it from the Dock, Launchpad or Spotlight, or just type `headroom.localhost` in
+your browser.
 
-Unzip it, drag headroom into Applications and open it. The first time, macOS won't open it
-because the app isn't notarised by Apple. Go to System Settings → Privacy & Security, scroll
-down and click Open Anyway. You only have to do that once.
+### Updating
 
-You don't need Python or anything else installed.
+When you open headroom, it asks GitHub whether there's a newer version, at most once a day. If
+there is, the top bar says "headroom 1.5 is out · Get it". Maintenance → Updates has a **Check
+for updates** button too.
+
+To update, quit headroom (right-click its Dock icon → Quit), download the new zip, unzip it and
+drag headroom into Applications. Click **Replace** when Finder asks. A new download may need
+Open Anyway once more. Your settings, history and "Never offered" list stay.
+
+### Uninstalling
+
+Quit headroom and drag it from Applications to the Trash. Then paste this into Terminal to
+remove its helpers, settings and history:
+
+```sh
+for agent in local.headroom.door local.headroom.watch local.localhost.door; do
+  launchctl bootout gui/$(id -u)/$agent 2>/dev/null
+  rm -f ~/Library/LaunchAgents/$agent.plist
+done
+rm -rf ~/Library/Application\ Support/headroom ~/Library/Logs/headroom ~/Library/Logs/headroom.log
+```
+
+If you also use harbor, keep `local.localhost.door` (it serves `harbor.localhost` too): take it
+out of the first line.
 
 ## Using it
 
@@ -47,15 +89,7 @@ You can also just type `headroom.localhost` in your browser, even when headroom 
 it starts. macOS keeps that address free for it, so nothing actually runs until you visit. (If
 Safari searches for it instead, type `headroom.localhost/` once.) The page itself lives on port
 8460; the plain name is a tiny redirect on port 80 that also knows `harbor.localhost`, my other
-app. If you ever want all that gone:
-
-```sh
-launchctl bootout gui/$(id -u)/local.headroom.door
-launchctl bootout gui/$(id -u)/local.localhost.door
-launchctl bootout gui/$(id -u)/local.headroom.watch
-rm ~/Library/LaunchAgents/local.headroom.door.plist ~/Library/LaunchAgents/local.localhost.door.plist \
-   ~/Library/LaunchAgents/local.headroom.watch.plist
-```
+app. [Uninstalling](#uninstalling) says how to remove those helpers.
 
 The first scan may ask for access to Desktop, Documents and Downloads. That's how it finds
 `node_modules` and build folders in your projects.
@@ -77,13 +111,6 @@ free 500 MB or more, it says how much. It checks every half hour in the backgrou
 repeats itself within six hours unless another 5 GB went, and never deletes anything on its
 own. The first time you open headroom, macOS asks whether it may send notifications. Click one
 and headroom opens. You can turn either reminder off, or change the 20 GB, under Maintenance.
-
-### Updates
-
-When you open headroom, it asks GitHub whether there's a newer version, at most once a day. If
-there is, the top bar says so, with a link to it. Maintenance → Updates has a **Check for
-updates** button too. To update, download the new zip, unzip it and drag headroom into
-Applications over the old one. Your settings, history and "Never offered" list stay.
 
 ### Full Disk Access
 
