@@ -8,11 +8,14 @@
 // Typing headroom.localhost:8460 into a browser also opens headroom. A LaunchAgent asks launchd
 // to hold that port while headroom is closed; the first connection makes launchd start this
 // program with --launchd, and the listening sockets are handed to the server, which answers the
-// browser that is already waiting. Nothing runs until then.
+// browser that is already waiting. Nothing runs until then. If another program already has 8460,
+// headroom takes the next free port instead and stays on it (see AppPort).
 //
 // Plain headroom.localhost (port 80) works too: a second agent holds port 80 and starts this
-// program with --door, which only redirects by name (headroom.localhost → :8460, harbor.localhost
-// → :8470) and exits when idle. harbor carries the same door, so either app can serve it.
+// program with --door, which only redirects by name (headroom.localhost and harbor.localhost, to
+// the ports the two apps are on) and exits when idle. harbor carries a door too, and when the
+// door is harbor's it stays harbor's: that one also opens harbor's projects by name
+// (<name>.localhost).
 //
 // Reminders: an agent the server sets up (local.headroom.watch) starts this program with --watch
 // every half hour. It asks the server program what is worth saying (space running low, or what Safe
@@ -22,7 +25,99 @@ import AppKit
 import UserNotifications
 
 let label = "local.headroom.door"
-let port = "8460"
+
+// The ports the two apps answer on. Each has a usual one (headroom 8460, harbor 8470) and may move
+// up to 19 past it. launchd doesn't refuse an agent whose port another program already holds on
+// 127.0.0.1 or ::1: it loads the agent and hands over a socket that isn't bound, and that address
+// keeps going to the other program. So when the port is taken, the app moves to the next free one
+// and stays there, and writes it to a small file. The port-80 door (this one, or harbor's) reads
+// the two files, so the names land on the apps wherever they are. harbor does the same.
+struct AppPort {
+    let usual: Int
+    let file: String
+    static let headroom = AppPort(usual: 8460, file: NSHomeDirectory() + "/Library/Application Support/headroom/port")
+    static let harbor = AppPort(usual: 8470, file: NSHomeDirectory() + "/Library/Application Support/local.harbor/port")
+    var range: ClosedRange<Int> { usual...(usual + 19) }
+
+    // What the file says: plain digits, inside the app's range. No file, or anything else, means
+    // the usual port.
+    var reserved: Int {
+        guard let text = try? String(contentsOfFile: file, encoding: .utf8) else { return usual }
+        let digits = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (1...5).contains(digits.utf8.count), digits.utf8.allSatisfy({ (48...57).contains($0) }),
+              let port = Int(digits), range.contains(port) else { return usual }
+        return port
+    }
+
+    // Plain digits, 0600, put in place in one step. Nothing is written while the file (or its
+    // absence) already says so.
+    func record(_ port: Int) {
+        guard range.contains(port), reserved != port else { return }
+        try? FileManager.default.createDirectory(atPath: (file as NSString).deletingLastPathComponent,
+                                                 withIntermediateDirectories: true)
+        let new = file + ".new"
+        unlink(new)
+        let fd = open(new, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { return }
+        let digits = Array(String(port).utf8)
+        let written = write(fd, digits, digits.count) == digits.count
+        close(fd)
+        if written { rename(new, file) } else { unlink(new) }
+    }
+
+    // Binds a loopback address on `port`, or (answers) connects to whatever listens there.
+    private static func loopback(_ port: Int, v6: Bool, answers: Bool) -> Bool {
+        let fd = socket(v6 ? AF_INET6 : AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0, let number = UInt16(exactly: port) else { return false }
+        defer { close(fd) }
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+        if answers { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) }
+        func reach(_ address: UnsafePointer<sockaddr>, _ size: Int) -> Bool {
+            if !answers { return Darwin.bind(fd, address, socklen_t(size)) == 0 }
+            if Darwin.connect(fd, address, socklen_t(size)) == 0 { return true }
+            // Not at once: a second for it, so a stuck listener can't hold the launch up.
+            var waiting = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            var failure: Int32 = 0
+            var length = socklen_t(MemoryLayout<Int32>.size)
+            return errno == EINPROGRESS && poll(&waiting, 1, 1000) > 0
+                && getsockopt(fd, SOL_SOCKET, SO_ERROR, &failure, &length) == 0 && failure == 0
+        }
+        if v6 {
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, socklen_t(MemoryLayout<Int32>.size))
+            var address = sockaddr_in6()
+            address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            address.sin6_family = sa_family_t(AF_INET6)
+            address.sin6_port = number.bigEndian
+            address.sin6_addr = in6addr_loopback
+            return withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { reach($0, MemoryLayout<sockaddr_in6>.size) }
+            }
+        }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = number.bigEndian
+        address.sin_addr.s_addr = INADDR_LOOPBACK.bigEndian
+        return withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { reach($0, MemoryLayout<sockaddr_in>.size) }
+        }
+    }
+
+    // Can 127.0.0.1 and ::1 both be bound on this port right now? A program listening on all
+    // interfaces doesn't count: launchd binds the two loopback addresses beside it.
+    static func free(_ port: Int) -> Bool {
+        loopback(port, v6: false, answers: false) && loopback(port, v6: true, answers: false)
+    }
+
+    // Does another listener really hold it? Not being able to bind it isn't enough: for half a
+    // minute after an agent is unloaded, the connections it just closed keep the port from being
+    // bound here, while launchd can bind it again. Taken means it can't be bound and something
+    // answers on it.
+    static func taken(_ port: Int) -> Bool {
+        !free(port) && (loopback(port, v6: false, answers: true) || loopback(port, v6: true, answers: true))
+    }
+}
 
 @_silgen_name("launch_activate_socket")
 func launch_activate_socket(_ name: UnsafePointer<CChar>,
@@ -73,7 +168,7 @@ final class Shell: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     @objc func openPage() {
-        if let page = page ?? URL(string: "http://headroom.localhost:\(port)/") {
+        if let page = page ?? URL(string: "http://headroom.localhost:\(AppPort.headroom.reserved)/") {
             NSWorkspace.shared.open(page)
         }
     }
@@ -112,6 +207,12 @@ final class Shell: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             if let found = text.range(of: #"(?<=open at )http://\S+"#, options: .regularExpression) {
                 let address = URL(string: String(text[found]))
                 DispatchQueue.main.async { self?.page = address }
+                // launchd had no usable socket for us (another program holds the port), so the
+                // server found its own: that is headroom's port from now on. Only the copy the
+                // agent starts says so; one run from a build folder leaves the file alone.
+                if sockets.isEmpty, CommandLine.arguments.contains("--launchd"), let moved = address?.port {
+                    AppPort.headroom.record(moved)
+                }
             }
         }
         let watch = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
@@ -166,7 +267,8 @@ final class Shell: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 }
 
-// The LaunchAgent that keeps headroom.localhost:8460 answerable while headroom is closed.
+// The LaunchAgent that keeps headroom.localhost:8460 (or the port headroom moved to) answerable
+// while headroom is closed.
 enum Door {
     static let plist = NSHomeDirectory() + "/Library/LaunchAgents/\(label).plist"
     static let request = NSHomeDirectory() + "/Library/Application Support/headroom/open-page"
@@ -183,26 +285,43 @@ enum Door {
             return false
         }
         PortDoor.install(program: program)
-        let wanted: [String: Any] = [
-            "Label": label,
-            "ProgramArguments": [program, "--launchd"],
-            "ProcessType": "Interactive",
-            "Sockets": [
-                "v4": ["SockNodeName": "127.0.0.1", "SockServiceName": port, "SockFamily": "IPv4"],
-                "v6": ["SockNodeName": "::1", "SockServiceName": port, "SockFamily": "IPv6"],
-            ],
-        ]
+        func agent(_ port: Int) -> [String: Any] {
+            [
+                "Label": label,
+                "ProgramArguments": [program, "--launchd"],
+                "ProcessType": "Interactive",
+                "Sockets": [
+                    "v4": ["SockNodeName": "127.0.0.1", "SockServiceName": String(port), "SockFamily": "IPv4"],
+                    "v6": ["SockNodeName": "::1", "SockServiceName": String(port), "SockFamily": "IPv6"],
+                ],
+            ]
+        }
+        let reserved = AppPort.headroom.reserved
         let current = NSDictionary(contentsOfFile: plist) as? [String: Any]
         let loaded = launchctl(["print", "\(domain)/\(label)"])
-        if loaded, let current, NSDictionary(dictionary: current).isEqual(to: wanted) {
+        // Loaded with this port: launchd holds it for headroom already.
+        if loaded, let current, NSDictionary(dictionary: current).isEqual(to: agent(reserved)) {
             return true
         }
         if loaded {
             _ = launchctl(["bootout", "\(domain)/\(label)"])
         }
+        // Whenever the agent has to be written, the port is checked first. If something else
+        // answers on it, wait a few seconds (it may only be launchd letting go of ours after the
+        // bootout), then move to the next free port in the range, and stay on that one.
+        var port = reserved
+        var waited = 0
+        while AppPort.taken(port), waited < 15 {
+            usleep(200_000)
+            waited += 1
+        }
+        if AppPort.taken(port), let next = AppPort.headroom.range.first(where: AppPort.free) {
+            port = next
+        }
+        AppPort.headroom.record(port)
         try? FileManager.default.createDirectory(atPath: (plist as NSString).deletingLastPathComponent,
                                                  withIntermediateDirectories: true)
-        guard (wanted as NSDictionary).write(toFile: plist, atomically: true) else { return false }
+        guard (agent(port) as NSDictionary).write(toFile: plist, atomically: true) else { return false }
         return launchctl(["bootstrap", domain, plist])
     }
 
@@ -228,6 +347,7 @@ enum Door {
     }
 
     // The listening sockets launchd holds for us, moved above 10 so they can be placed at 3, 4.
+    // One whose address another program already held comes back unbound (port 0): it is left out.
     static func sockets() -> [Int32] {
         var all: [Int32] = []
         for name in ["v4", "v6"] {
@@ -235,7 +355,14 @@ enum Door {
             var count = 0
             guard launch_activate_socket(name, &fds, &count) == 0, let fds else { continue }
             for index in 0..<count {
-                let moved = fcntl(fds[index], F_DUPFD_CLOEXEC, 10)
+                var address = sockaddr_storage()
+                var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
+                // sin_port and sin6_port sit at the same offset.
+                let bound = withUnsafeMutablePointer(to: &address) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fds[index], $0, &length) } == 0
+                        && pointer.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_port } != 0
+                }
+                let moved = bound ? fcntl(fds[index], F_DUPFD_CLOEXEC, 10) : -1
                 if moved >= 0 { all.append(moved) }
                 close(fds[index])
             }
@@ -263,18 +390,27 @@ enum Door {
 // The port-80 door: lets plain headroom.localhost and harbor.localhost open their apps.
 enum PortDoor {
     static let label = "local.localhost.door"
-    static let routes = ["headroom.localhost": 8460, "harbor.localhost": 8470]
+    // Where the two apps are right now: read from their port files on every request.
+    static var routes: [String: Int] {
+        ["headroom.localhost": AppPort.headroom.reserved, "harbor.localhost": AppPort.harbor.reserved]
+    }
     static var keep: [DispatchSourceProtocol] = []
 
     // Loads the shared agent unless a working copy is already there (harbor may have set it up).
+    // A door of harbor's is never taken over: harbor's also carries its projects' names
+    // (<name>.localhost), which this one can't. If harbor's isn't loaded, it is loaded as it is.
     static func install(program: String) {
         let plist = NSHomeDirectory() + "/Library/LaunchAgents/\(label).plist"
-        if Door.launchctl(["print", "\(Door.domain)/\(label)"]),
-           let current = NSDictionary(contentsOfFile: plist),
-           let owner = (current["ProgramArguments"] as? [String])?.first,
-           FileManager.default.isExecutableFile(atPath: owner) {
+        let owner = (NSDictionary(contentsOfFile: plist)?["ProgramArguments"] as? [String])?.first
+        let works = owner.map { FileManager.default.isExecutableFile(atPath: $0) } ?? false
+        if works, Door.launchctl(["print", "\(Door.domain)/\(label)"]) {
             return
         }
+        if works, owner?.hasSuffix("/Contents/MacOS/Harbor") == true,
+           Door.launchctl(["bootstrap", Door.domain, plist]) || Door.launchctl(["print", "\(Door.domain)/\(label)"]) {
+            return      // loaded now, by this or by harbor itself in the meantime
+        }
+        // No door at all would be worse than headroom's: if harbor's can't be loaded, this one goes in.
         _ = Door.launchctl(["bootout", "\(Door.domain)/\(label)"])
         let agent: NSDictionary = [
             "Label": label,
