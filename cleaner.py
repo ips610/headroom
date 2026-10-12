@@ -10,6 +10,7 @@ import collections
 import ctypes
 import datetime
 import errno
+import fcntl
 import functools
 import hashlib
 import http.client
@@ -25,21 +26,38 @@ import ssl
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 
-def run(command, timeout=None, input=None):
+def run(command, timeout=None, input=None, watch=None):
     """Start a program and collect what it prints. `input` is text for it to read.
 
     close_fds=False lets Python use posix_spawn rather than fork. A Mac with a full disk runs
     out of memory to fork with, which is exactly when this tool gets opened, and spawn still works.
+
+    `watch` is asked many times a second while the program runs. When it answers True, or the
+    time is up, the program is stopped there and its return code is -9. What the program did in
+    the moment between two askings is done: the caller looks again afterwards.
     """
-    return subprocess.run(command, capture_output=True, text=True, close_fds=False, timeout=timeout, input=input)
+    if watch is None:
+        return subprocess.run(command, capture_output=True, text=True, close_fds=False, timeout=timeout, input=input)
+    child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, close_fds=False)
+    started = time.monotonic()
+    while True:
+        try:
+            out, err = child.communicate(timeout=0.05)
+            return subprocess.CompletedProcess(command, child.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            if watch() or (timeout and time.monotonic() - started > timeout):
+                child.kill()
+                out, err = child.communicate()
+                return subprocess.CompletedProcess(command, -9, out, err)
 
 
 HOME = os.path.realpath(os.path.expanduser("~"))
@@ -60,7 +78,7 @@ RUN = secrets.token_hex(8)
 NONCE = secrets.token_urlsafe(16)
 
 # install.py and package.sh read the version from here. A newer release on GitHub shows up in the app.
-VERSION = "1.8"
+VERSION = "1.9"
 RELEASES = "https://github.com/ips610/headroom/releases"
 
 APPLICATIONS = "/Applications"
@@ -2446,6 +2464,19 @@ def blocked(row, running):
     return git_busy(row["git"]) if row["git"] else ""
 
 
+def safe_row(row, alone=False):
+    """Whether Safe clean takes a row. The one rule: the button on the page goes by it (it is the
+    row's `safe`), and so do the weekly reminder's sum and the weekly run. App caches, logs and
+    temp files, and installers over a month old. Never one used this week, one that a command
+    clears (git gc, Docker, Homebrew), or the local copy of an iCloud Drive file.
+
+    `alone` is the weekly run by itself, which takes less: caches, logs and old temporary files
+    only. An installer is a file in a folder you look at (Downloads, the Desktop), and nobody is
+    watching that run: those wait for the button."""
+    takes = row["group"] in SAFE_GROUPS or (row["safe"] and not alone)
+    return bool(takes and not row["recent"] and not row["cmd"] and not row["git"] and not row["evict"])
+
+
 def stays_put(row):
     """Why a row can't be cleaned while "Move cleaned files to the Trash" is on: '' when its files
     can go there. Nothing is removed for good in that mode, so what only a command can remove
@@ -2460,7 +2491,7 @@ def stays_put(row):
 def public(row, running, to_trash=False):
     return {"id": row["id"], "group": row["group"], "name": row["name"], "detail": row["detail"],
             "kb": row["kb"], "blocked": blocked(row, running) or (stays_put(row) if to_trash else ""),
-            "note": row["note"], "recent": row["recent"], "safe": row["safe"] or row["group"] in SAFE_GROUPS,
+            "note": row["note"], "recent": row["recent"], "safe": safe_row(row),
             "trash": row["trash"], "action": "git gc" if row["git"] else "", "rank": row["rank"],
             "weighs": row["weighs"], "bundle": row["bundle"]["key"] if row["bundle"] else "", "inside": row["inside"],
             "when": row["when"], "evict": row["evict"]}
@@ -2516,6 +2547,21 @@ def history_file():
 def protected():
     entries = load_state("protected.json", [])
     return [e for e in entries if isinstance(e, dict) and isinstance(e.get("keys"), list)] if isinstance(entries, list) else []
+
+
+def protected_broken():
+    """True when the Never offer list is there but can't be read as one. protected() takes that
+    for an empty list, which the page shows for what it is. Nobody sees it when Safe clean runs
+    by itself, so that run asks here first."""
+    if not os.path.lexists(protected_file()):
+        return False
+    try:
+        with open(protected_file()) as handle:
+            entries = json.load(handle)
+    except (OSError, ValueError):
+        return True
+    return not isinstance(entries, list) or not all(
+        isinstance(e, dict) and isinstance(e.get("keys"), list) and all(isinstance(k, str) for k in e["keys"]) for e in entries)
 
 
 def save_protected(entries):
@@ -2979,12 +3025,37 @@ def watch_item(size, before, finished):
         JOB["item_kb"] = max(JOB["item_kb"], min(size, free_kb() - before))
 
 
-def run_job(rows, to_trash=False):
+def begin_job(rows, to_trash):
+    """Mark a job as started, as the page's progress bar reads it. Whoever calls has made sure no other is running."""
+    JOB.update(running=True, stopping=False, total_kb=sum(r["kb"] for r in rows), done_kb=0,
+               item_kb=0, index=0, count=len(rows), current=None, results=[], trash=to_trash)
+
+
+def job_lock(wait):
+    """The lock a job holds from start to end. headroom is two programs at times (the page's
+    server, and the half-hourly check that can run Safe clean by itself), and only one of them
+    clears at a time. The open file: close it to let go. None when another job has it and `wait`
+    is False, or when the lock can't be had at all."""
+    try:
+        os.makedirs(state_dir(), exist_ok=True)
+        handle = open(os.path.join(state_dir(), "job.lock"), "w")
+    except OSError:
+        return None
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
+def run_job(rows, to_trash=False, held=None):
     """Clear the rows one after another. Rows on their way to the Trash don't each get a call to
     Finder: up to a hundred paths wait together and go in one, and every row still gets its own
     result. iCloud files whose local copy goes wait together the same way, for the iCloud helper.
     Stop is honoured between such calls: rows that were waiting stay as they were."""
     waiting, bundled = [], {}       # (index, row, its size, why some of it stays, paths to hand over); bundle -> results
+    mine = None if held else job_lock(wait=True)      # `held`: the caller took the lock before it scanned
 
     def done(row, size, result):
         errors = result["errors"]
@@ -3062,6 +3133,8 @@ def run_job(rows, to_trash=False):
             keep_found({r["id"] for r in JOB["results"]})
         finally:
             JOB.update(running=False, current=None)
+            if mine:
+                mine.close()
 
 
 def remember_bundles(bundled):
@@ -3707,7 +3780,9 @@ def settings():
             "alert_gb": gb if isinstance(gb, int) and 1 <= gb <= 1000 else 20,
             "trash": saved.get("trash") is True,     # cleaned files go to the Trash, not straight off: off unless chosen
             # Local copies of iCloud Drive files are offered: off unless chosen, and off when this can't be read.
-            "cloud": saved.get("cloud") is True}
+            "cloud": saved.get("cloud") is True,
+            # Safe clean runs by itself once a week: off unless chosen, and off when this can't be read.
+            "auto": saved.get("auto") is True}
 
 
 def settings_broken():
@@ -3754,23 +3829,405 @@ def update_info(force=False):
         except (OSError, http.client.HTTPException, ValueError):
             error = "GitHub didn't answer. Try again later."
     latest = saved.get("latest")
-    if not (isinstance(latest, str) and re.fullmatch(r"\d+(\.\d+)*", latest)):
+    if not (isinstance(latest, str) and re.fullmatch(r"[0-9]+(\.[0-9]+)*", latest)):     # 0 to 9 only: it goes into an address
         latest = None
-    newer = latest is not None and tuple(map(int, latest.split("."))) > tuple(map(int, VERSION.split(".")))
+    newer = latest is not None and number(latest) > number(VERSION)
     return {"current": VERSION, "latest": latest, "newer": newer, "error": error,
-            "url": f"{RELEASES}/tag/v{latest}" if newer else RELEASES}
+            "url": f"{RELEASES}/tag/v{latest}" if newer else RELEASES,
+            # "Update now" is offered only where it can be done safely: see update_offer().
+            "can_update": bool(newer and update_offer())}
+
+
+# --- Update now: the owner's click replaces this app with the newest release ---------------------------
+#
+# Never in the background: only the page's own POST starts it, with the full session. What makes it
+# safe is one check, the signature: the app that comes down must satisfy the designated requirement
+# of the app that is running (the same identifier, signed with the same certificate). The checksum
+# before it only catches a broken download. Every step that fails leaves the installed app exactly
+# as it was. Nothing a release says (a name, a version) reaches a shell: programs get argument
+# lists, and the page gets text.
+
+UPDATE_MAX = 60 * 1000 * 1000           # the zip is about 9 MB; anything this much bigger is not headroom
+UNPACKED_MAX = 120 * 1000 * 1000        # nor is anything that unpacks to more than this (headroom is about 30 MB unpacked)
+HTTPS = http.client.HTTPSConnection     # the tests put a stand-in here: no test reaches GitHub
+move = os.rename                        # and here, to see the swap undone
+
+
+class Refused(Exception):
+    """Why an update stopped, in words for the page. Raised only while the installed app is as it was."""
+
+
+def number(version):
+    return tuple(map(int, version.split(".")))
+
+
+def own_bundle():
+    """The app bundle this program runs from (…/headroom.app). None from a plain folder: ./run.sh, the tests."""
+    inside = os.path.realpath(os.path.dirname(sys.executable) if FROZEN else HERE)     # …/Contents/MacOS, or …/Contents/Resources
+    contents = os.path.dirname(inside)
+    app = os.path.dirname(contents)
+    plain = os.path.basename(contents) == "Contents" and app.endswith(".app") and os.path.isdir(app) and not os.path.islink(app)
+    return app if plain else None
+
+
+def designated(app):
+    """An app's designated requirement as codesign prints it ('identifier "local.headroom" and
+    certificate leaf = H"…"'): what any later version must satisfy to count as the same app from
+    the same signer. '' when codesign has none to give."""
+    try:
+        done = run(["/usr/bin/codesign", "-d", "-r-", app], timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    found = re.search(r"^(?:# )?designated => (.+)$", done.stdout, re.M) if done.returncode == 0 else None
+    return found.group(1).strip() if found else ""
+
+
+def update_offer():
+    """(the app, its designated requirement, its bundle id) when this headroom can update itself,
+    else None and the page keeps to the link to the Releases page. All of it must hold: it runs
+    from an app bundle; that bundle is signed with a certificate, so there is a signer for the new
+    one to be held to (an ad-hoc signature only names its own hash, which no other build has); and
+    this account may rename things in the folder the app is in."""
+    app = own_bundle()
+    if not app or not os.access(os.path.dirname(app), os.W_OK | os.X_OK):
+        return None
+    requirement, ident = designated(app), bundle_info(app).get("CFBundleIdentifier")
+    return (app, requirement, ident) if pins_signer(requirement) and isinstance(ident, str) and ident else None
+
+
+def pins_signer(requirement):
+    """True when a designated requirement holds its code to a signer: it has a certificate clause
+    (certificate leaf, certificate root, certificate 1…) or an anchor, and no cdhash. Read with
+    what is in quotes taken out: an identifier may be named anything, "local.certificate-test" too."""
+    bare = re.sub(r'"[^"]*"', '""', requirement)
+    return bool(re.search(r"\b(certificate\s+(leaf|root|\d+)|anchor)\b", bare)) and "cdhash" not in bare and "\n" not in requirement
+
+
+def release_asset():
+    """The zip for this Mac's chip, by what the hardware is and not by what this program was built
+    for: an Intel build running under Rosetta moves to the native one."""
+    try:
+        arm = run(["/usr/sbin/sysctl", "-in", "hw.optional.arm64"], timeout=20).stdout.strip() == "1"
+    except (OSError, subprocess.TimeoutExpired):
+        arm = False
+    return "headroom-apple-silicon.zip" if arm else "headroom-intel.zip"
+
+
+def fetch(url, limit, into=None):
+    """GET over HTTPS, from GitHub and nowhere else: the bytes, or with `into` a file written
+    there. Each address on the way (the first, and every redirect) must be https on github.com or
+    a name ending in .githubusercontent.com. Certificates are checked the default way. More than
+    `limit` bytes, said or sent, is refused."""
+    # The frozen app's Python has no certificates of its own; macOS keeps a bundle here.
+    cafile = "/etc/ssl/cert.pem" if os.path.exists("/etc/ssl/cert.pem") else None
+    deadline = time.monotonic() + 600
+    for _ in range(6):
+        parts = urlparse(url)
+        host = parts.hostname or ""
+        if (parts.scheme != "https" or not re.fullmatch(r"[a-z0-9.-]+", host)
+                or not (host == "github.com" or host.endswith(".githubusercontent.com"))
+                or parts.port not in (None, 443) or parts.username is not None or parts.password is not None):
+            raise Refused("The download was sent somewhere that isn't GitHub over https, so it was stopped.")
+        link = HTTPS(host, timeout=30, context=ssl.create_default_context(cafile=cafile))
+        try:
+            link.request("GET", (parts.path or "/") + ("?" + parts.query if parts.query else ""),
+                         headers={"User-Agent": f"headroom/{VERSION}", "Accept": "application/octet-stream"})
+            reply = link.getresponse()
+            if reply.status in (301, 302, 303, 307, 308):
+                url = urljoin(url, reply.getheader("Location") or "")
+                continue
+            if reply.status != 200:
+                raise Refused(f"GitHub answered {reply.status} for the download.")
+            said = reply.getheader("Content-Length") or ""
+            if said.isdigit() and int(said) > limit:
+                raise Refused("The download is far bigger than headroom is, so it was stopped.")
+            got, out = 0, open(into, "wb") if into else None
+            chunks = []
+            try:
+                while True:
+                    chunk = reply.read(256 * 1024)
+                    if not chunk:
+                        break
+                    got += len(chunk)
+                    if got > limit or time.monotonic() > deadline:
+                        raise Refused("The download is far bigger than headroom is, so it was stopped." if got > limit
+                                      else "The download took too long, so it was stopped.")
+                    out.write(chunk) if out else chunks.append(chunk)
+            finally:
+                if out:
+                    out.close()
+            return None if into else b"".join(chunks)
+        finally:
+            link.close()
+    raise Refused("The download was passed along too many times, so it was stopped.")
+
+
+def unpack_release(archive, into):
+    """Unpack the downloaded zip into the new folder `into` and return the app that came out,
+    which must be exactly one real folder named headroom.app, not a link.
+
+    The names are read first and an odd one is refused early, but that is only the zip's index:
+    ditto unpacks from the entries themselves, which can say something else. What protects is
+    this. ditto itself keeps what it writes inside `into`. The folder is measured while ditto
+    runs, and ditto is stopped when it holds more than headroom could be. What came out is looked
+    at, not what the zip said would. And nothing is installed without the signature check."""
+    with zipfile.ZipFile(archive) as packed:
+        total = 0
+        for entry in packed.infolist():
+            parts = entry.filename.rstrip("/").split("/")
+            total += entry.file_size
+            # Everything inside headroom.app. ditto also packs a "._name" beside what has extended attributes.
+            inside = parts[0] == "headroom.app" or (parts == ["._headroom.app"] and not entry.is_dir())
+            if entry.filename.startswith("/") or "\\" in entry.filename or not inside or any(p in ("", ".", "..") for p in parts):
+                raise Refused("The download holds something other than headroom.app, so it was not unpacked.")
+        if total > UNPACKED_MAX:
+            raise Refused("The download unpacks to far more than headroom is, so it was not unpacked.")
+    os.mkdir(into)
+
+    def too_big():
+        held = 0
+        for folder, _, names in os.walk(into):
+            for name in names:
+                try:
+                    held += os.lstat(os.path.join(folder, name)).st_size
+                except OSError:
+                    pass
+            if held > UNPACKED_MAX:
+                return True
+        return False
+    done = run(["/usr/bin/ditto", "-x", "-k", archive, into], timeout=600, watch=too_big)
+    if done.returncode == -9 or too_big():
+        raise Refused("The download unpacks to far more than headroom is, so it was stopped.")
+    new = os.path.join(into, "headroom.app")
+    if done.returncode or os.listdir(into) != ["headroom.app"] or os.path.islink(new) or not os.path.isdir(new):
+        raise Refused("What came out of the download isn't a plain headroom.app, so it was not installed.")
+    return new
+
+
+def plain_modes(app):
+    """Take away what the zip brought along beside the files themselves. ditto restores the modes
+    and access lists a zip carries, and the signature seals contents, not those: a genuine build
+    repacked with folders anyone may write to would pass it. So before the signature is checked,
+    every access list goes, nobody but the owner may write to any of it, and nothing is setuid or
+    setgid. A link's own mode is left alone, and no link is followed."""
+    try:
+        done = run(["/bin/chmod", "-RN", app], timeout=300)
+    except (OSError, subprocess.TimeoutExpired):
+        done = None
+    if done is None or done.returncode:
+        raise Refused("The download's permissions could not be set right, so it was not installed.")
+    try:
+        for folder, _, names in os.walk(app):
+            for path in [folder] + [os.path.join(folder, name) for name in names]:
+                mode = os.lstat(path).st_mode
+                if not stat.S_ISLNK(mode):
+                    os.chmod(path, stat.S_IMODE(mode) & ~0o6022, follow_symlinks=False)
+    except OSError:
+        raise Refused("The download's permissions could not be set right, so it was not installed.")
+
+
+def check_release(new, requirement, ident, latest):
+    """THE security check. The unpacked app must satisfy the running app's own designated
+    requirement: the same identifier, signed with the same certificate, every file in it sealed.
+    Then: it is this app, it is the version the release says, and that version is newer than the
+    one running. Never a step back, never sideways. Its modes and access lists are put right
+    first (see plain_modes): what is checked here is what gets installed."""
+    plain_modes(new)
+    try:
+        done = run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R=" + requirement, new], timeout=300)
+    except (OSError, subprocess.TimeoutExpired):
+        raise Refused("macOS could not check the download's signature, so it was not installed.")
+    if done.returncode:
+        raise Refused("The download isn't signed the way this headroom is, so it was not installed.")
+    info = bundle_info(new)
+    version = info.get("CFBundleShortVersionString")
+    if info.get("CFBundleIdentifier") != ident:
+        raise Refused("The download isn't headroom, so it was not installed.")
+    if not (isinstance(version, str) and re.fullmatch(r"\d+(\.\d+)*", version, re.A)) or version != latest:
+        raise Refused(f"The download isn't version {latest}, so it was not installed.")
+    if not number(version) > number(VERSION):
+        raise Refused("The download is no newer than the headroom you have, so it was not installed.")
+
+
+UPDATING = threading.Lock()
+
+
+def update_now():
+    """Replace this app with the newest release, because the owner pressed Update now: {ok, text,
+    version, trashed}. Each step that fails stops it there, with the installed app exactly as it
+    was and the reason in plain words. On success the new app is in its place, the old one is in
+    the Trash (or the text says exactly where it is), and this server hands over to the new one."""
+    global HELD_FOR_EXIT
+    if JOB["running"]:
+        return {"ok": False, "text": "A delete is running. Update when it is done."}
+    if not UPDATING.acquire(blocking=False):
+        return {"ok": False, "text": "An update is already under way."}
+    made, handing_over = {}, False
+    try:
+        try:
+            app, new, latest = fetch_release(made)
+        except Refused as why:
+            return {"ok": False, "text": str(why)}
+        except Exception as error:      # a zip Python can't read, a network that drops: nothing has been swapped
+            return {"ok": False, "text": f"The update did not finish: {sentence(getattr(error, 'strerror', None) or error)} headroom is as it was."}
+        # The download took a while. One more look before anything moves: no delete may be running,
+        # here or in headroom's other program. The lock is kept from here until this server stops.
+        lock = job_lock(wait=False)
+        if JOB["running"] or lock is None:
+            if lock:
+                lock.close()
+            return {"ok": False, "text": "A delete started meanwhile. Update when it is done. headroom is as it was."}
+        # The swap, by rename: the installed app steps aside into the scratch folder, the new one
+        # takes its place. If the second rename fails, the first is undone.
+        try:
+            aside = os.path.join(made["scratch"], "previous")
+            os.mkdir(aside)
+            old = os.path.join(aside, os.path.basename(app))
+            move(app, old)
+        except OSError as error:
+            lock.close()
+            return {"ok": False, "text": f"The update did not finish: {sentence(error.strerror or error)} headroom is as it was."}
+        try:
+            move(new, app)
+        except OSError as error:
+            lock.close()
+            try:
+                move(old, app)
+            except OSError:
+                return {"ok": False, "text": f"The update stopped half-way, and headroom's app is now at {old}. "
+                                             "Drag it back into the folder it was in."}
+            return {"ok": False, "text": f"The new version could not be put in place: {sentence(error.strerror or error)} headroom is as it was."}
+        where, trashed, said = retire(old, VERSION)
+        remember(f"headroom {VERSION}, the version before {latest}", "update", [where], 0, "trashed" if trashed else "failed",
+                 "" if trashed else said)
+        # From here on this server only stops: the update lock and the job lock stay held, so no
+        # delete can start in a server that is about to go.
+        handing_over, HELD_FOR_EXIT = True, lock
+        restart_into(app)
+        return {"ok": True, "version": latest, "trashed": trashed, "text": said}
+    finally:
+        if made.get("scratch"):
+            tidy_update(made["scratch"])
+        if not handing_over:
+            UPDATING.release()
+
+
+HELD_FOR_EXIT = None        # the job lock, after a swap: kept until this server stops
+
+
+def fetch_release(made):
+    """Everything before the swap: is this headroom one that can update itself, what is the newest
+    release, download it, check it. (the installed app, the new app unpacked and checked, its
+    version). `made` gets the scratch folder as soon as there is one, for clearing away. Raises
+    Refused, or whatever went wrong: nothing here has touched the installed app."""
+    offer = update_offer()
+    if not offer:
+        raise Refused("This copy of headroom can't update itself. Get the new version from the Releases page.")
+    app, requirement, ident = offer
+    found = update_info(force=True)
+    if not found["newer"]:
+        raise Refused(found["error"] or "You have the newest version.")
+    latest, asset = found["latest"], release_asset()
+    # Beside the app, so the swap is a rename on one volume. mkdtemp makes it for this account only (0700).
+    made["scratch"] = scratch = tempfile.mkdtemp(prefix=".headroom-update-", dir=os.path.dirname(app))
+    archive = os.path.join(scratch, asset)
+    try:
+        fetch(f"{RELEASES}/download/v{latest}/{asset}", UPDATE_MAX, archive)
+        # The checksum is published beside the zip, by whoever published the zip: it catches a
+        # download that broke on the way and nothing else. The signature check below is the security.
+        sums = fetch(f"{RELEASES}/download/v{latest}/SHA256SUMS", 64 * 1024).decode("ascii", "replace")
+    except (OSError, http.client.HTTPException) as error:
+        # Seen for real: a campus network that lets github.com through and resets every connection
+        # to the server GitHub hands its downloads to. The Releases page fails there the same way.
+        raise Refused(f"The download did not arrive: {sentence(getattr(error, 'strerror', None) or error)} Some networks block "
+                      "GitHub's downloads; if it keeps happening, try on another network. headroom is as it was.")
+    wanted = {name: digest for digest, name in re.findall(r"^([0-9a-f]{64})[ \t]+\*?(\S+)$", sums, re.M)}.get(asset)
+    digest = hashlib.sha256()
+    with open(archive, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    if not wanted or digest.hexdigest() != wanted:
+        raise Refused("The download didn't arrive whole (its checksum is wrong). Try again.")
+    new = unpack_release(archive, os.path.join(scratch, "new"))
+    check_release(new, requirement, ident, latest)
+    return app, new, latest
+
+
+def retire(old, version):
+    """Put the app that was replaced where it can be found again: (where it is now, whether that
+    is the Trash, what to tell the owner). The Trash is a folder: the app is renamed into it,
+    under a name that is free. Not through Finder, as everything else of yours goes: the old app
+    is still running at this moment (it is this server), and in a real update Finder held the
+    request for two minutes and then refused it. If the rename can't be done the app stays where
+    it is, and the words say exactly where. Never deleted."""
+    why = ""
+    try:
+        os.makedirs(home(".Trash"), mode=0o700, exist_ok=True)
+    except OSError:
+        pass
+    for n in range(1, 100):
+        there = home(".Trash", f"headroom {version}.app" if n == 1 else f"headroom {version} {n}.app")
+        if os.path.lexists(there):
+            continue
+        try:
+            os.rename(old, there)
+            return there, True, f"The version you had is in the Trash, as {os.path.basename(there)}."
+        except OSError as error:
+            # The Trash can't be looked into without Full Disk Access, so a name that is taken shows only here.
+            if error.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                continue
+            why = sentence(error.strerror or error)
+            break
+    return old, False, f"The version you had could not be moved to the Trash. It is at {old}, and you can delete it yourself. {why}".strip()
+
+
+def tidy_update(scratch):
+    """Clear away what the update made: the zip and what was unpacked. Never the old app: if that
+    is still in there (Finder did not take it), the folder stays, and the page has said where."""
+    for name in ("headroom-apple-silicon.zip", "headroom-intel.zip"):
+        try:
+            os.remove(os.path.join(scratch, name))
+        except OSError:
+            pass
+    shutil.rmtree(os.path.join(scratch, "new"), ignore_errors=True)
+    for folder in (os.path.join(scratch, "previous"), scratch):
+        try:
+            os.rmdir(folder)        # only when empty
+        except OSError:
+            pass
+
+
+def restart_into(app):
+    """Hand over to the app that was just put in place, started the way it normally is, and stop
+    this server. Started by the launch agent (the usual case), stopping is all it takes: the agent
+    keeps the port, and the page's next request starts the app that is at that path now. Otherwise
+    LaunchServices opens it, as a double click would. The page's address is never put on a command line."""
+    def go():
+        time.sleep(1.5)         # the page gets its answer first
+        while JOB["running"]:   # none can be (the job lock is held), but a History line is never cut off
+            time.sleep(0.2)
+        if not os.environ.get("HEADROOM_LISTEN_FDS"):
+            try:
+                # -n: the launcher that started this server is still on its way out, and must not be taken for the app.
+                os.posix_spawn("/usr/bin/open", ["/usr/bin/open", "-n", app], os.environ)
+            except OSError:
+                pass
+        os._exit(0)
+    threading.Thread(target=go, daemon=True).start()
 
 
 def launcher_program():
     """The app's own launcher, which can post notifications. None when headroom isn't running
     from an installed app (./run.sh, the tests, a build folder, a copy still in Downloads):
     then reminders are left alone, so a stray copy can't point the agent at itself."""
-    installed = ("/Applications/", home("Applications") + os.sep)
     for candidate in (os.path.join(HERE, "..", "MacOS", "headroom-app"),
                       os.path.join(os.path.dirname(sys.executable), "headroom-app")):
         if os.access(candidate, os.X_OK):
             program = os.path.realpath(candidate)
-            return program if program.startswith(installed) else None
+            # Installed: the app itself sits in an Applications folder, not somewhere below one. The
+            # copy an update set aside lies in a folder beside the app, and must not count.
+            app = os.path.dirname(os.path.dirname(os.path.dirname(program)))
+            return program if os.path.dirname(app) in (APPLICATIONS, home("Applications")) else None
     return None
 
 
@@ -3780,7 +4237,7 @@ def sync_watch():
     if not program:
         return
     domain, path = f"gui/{os.getuid()}", home("Library", "LaunchAgents", WATCH_LABEL + ".plist")
-    wanted_on = settings()["alert"] or settings()["weekly"]
+    wanted_on = settings()["alert"] or settings()["weekly"] or settings()["auto"]
     wanted = {"Label": WATCH_LABEL, "ProgramArguments": [program, "--watch"], "StartInterval": 1800,
               "ProcessType": "Background", "LowPriorityIO": True, "Nice": 10}
     try:
@@ -3831,6 +4288,7 @@ def add_sample(free_kb, when=None):
 
 SAFE_SOURCES = ("caches", "app_data", "app_extras", "sandboxed", "logs", "temp", "browser_copies", "installers",
                 "qbittorrent")
+SAFE_WORTH = 500e6      # bytes. Under this the weekly reminder says nothing, and the weekly run does nothing
 
 
 def measure_safe():
@@ -3839,15 +4297,114 @@ def measure_safe():
     for source in SAFE_SOURCES:
         found = SOURCES[source][1]()
         rows = found[0] if isinstance(found, tuple) else found
-        total += sum(r["kb"] for r in unprotected(rows) if (r["safe"] or r["group"] in SAFE_GROUPS)
-                     and not r["recent"] and r["kb"] >= MIN_KB and not blocked(r, running))
+        total += sum(r["kb"] for r in unprotected(rows) if safe_row(r) and r["kb"] >= MIN_KB and not blocked(r, running))
     return total
+
+
+def safe_rows(to_trash):
+    """A scan made now of every place the weekly run's rows come from, and the rows it takes:
+    (rows, how many places were left out). It is the page's own scan of each place (Never offer,
+    the size floor, FOUND), so nothing here is an older listing, and the rows are picked by the
+    button's own rule, less the installers (see safe_row), and less what an open app or the Move
+    to Trash switch holds back. A place whose scan had anything to say (it was unsure, or macOS
+    kept part of it shut) is left out whole. A place that can only hold what this run never takes
+    isn't looked at."""
+    running, rows, left_out = processes(), [], 0
+    for source in SAFE_SOURCES:
+        if not set(SOURCES[source][0]) & set(SAFE_GROUPS):
+            continue                # installers: not this run's, so their folders aren't even listed
+        notice = scan_once(source)["notice"]
+        if notice or isinstance(notice, Unsure):        # an unsure scan with nothing to say is unsure all the same
+            left_out += 1
+            continue
+        with LOCK:
+            found = list(FOUND[source].values())
+        rows += [row for row in found if safe_row(row, alone=True) and not blocked(row, running) and not (to_trash and stays_put(row))]
+    return rows, left_out
+
+
+BUSY_NOW = "busy"       # another job is running: the weekly run waits for the next check
+
+
+def clean_alone(now, state):
+    """The weekly Safe clean with nobody at the page: only with its switch on, at the moment the
+    weekly reminder would have come. A (title, text) to post, None when there is nothing to say,
+    or BUSY_NOW when another job is running and this should be tried again at the next check.
+
+    Nothing here picks or removes on its own account. safe_rows() is the scan and the rule the
+    button uses, and run_job() is the page's own removal with every guard it has: deletable() and
+    trashable(), the `seen` checks, the Move to Trash switch. It touches no session: this runs in
+    the reminder's half-hourly check, which has none.
+
+    Whatever is in doubt stops it: settings or a Never offer list that can't be read, a date that
+    can't be kept, a switch that moved while it was scanning."""
+    last = state.get("auto_at")
+    if isinstance(last, (int, float)) and not now - last >= 7 * DAY:
+        return None             # never twice inside seven days, whatever became of the reminder's own date
+    if settings_broken():
+        return None             # nobody knows where cleaned files were meant to go: nothing is cleared on a guess
+    if JOB["running"]:
+        return BUSY_NOW
+    lock = job_lock(wait=False)             # the page's server is another program: its jobs hold this
+    if lock is None:
+        return BUSY_NOW
+    try:
+        # With the lock in hand nothing else is clearing. What another check wrote while this one
+        # was starting counts: two checks that overlap must not both run.
+        saved = load_state("watch.json", {})
+        other = saved.get("auto_at") if isinstance(saved, dict) else None
+        if isinstance(other, (int, float)) and not now - other >= 7 * DAY:
+            state["auto_at"] = other
+            return None
+        if protected_broken():
+            # Read as empty, the list would hand over everything you asked to keep.
+            remember("Safe clean, by itself", "auto", [], 0, "failed",
+                     "It did not run this week: the Never offer list can't be read, and nothing is cleared on a guess at what you wanted kept.")
+            return None
+        rows, left_out = safe_rows(settings()["trash"])
+        # The scan took a while. The switches count as they are now, not as they were when it began.
+        chosen = settings()
+        if settings_broken() or not chosen["auto"]:
+            return None
+        to_trash = chosen["trash"]
+        rows = [row for row in rows if not (to_trash and stays_put(row))]
+        if sum(row["kb"] for row in rows) * 1024 < SAFE_WORTH:
+            return None         # under the reminder's own mark: nothing is done, and nothing is said
+        state["auto_at"] = now
+        if not save_state("watch.json", state):
+            # The date can't be kept (a full disk, a folder that can't be written): run now, and
+            # it would run again at every check. Before the first file goes, so nothing has.
+            state.pop("auto_at") if last is None else state.update(auto_at=last)
+            return None
+        begin_job(rows, to_trash)
+        run_job(rows, to_trash, held=lock)
+        results = JOB["results"]
+        freed, stayed = sum(r["freed_kb"] for r in results), [r for r in results if r["errors"]]
+        said = [f"{count(len(results) - len(stayed), 'item', 'items')} cleared"]
+        if stayed:
+            said.append(f"{len(stayed)} could not be: {stayed[0]['errors'][0]}")
+        if left_out:
+            said.append(f"{count(left_out, 'place was', 'places were')} left out, because headroom could not look properly")
+        remember("Safe clean, by itself", "auto", [], freed, "ran" if freed or not stayed else "failed", note=". ".join(said))
+        if not freed:
+            return "Safe clean ran and freed nothing", "headroom ran it by itself. History says why."
+        if to_trash:
+            return f"Safe clean moved {size_text(freed)} to the Trash", "headroom ran it by itself. Empty the Trash to get the space."
+        return f"Safe clean freed {size_text(freed)}", "headroom ran it by itself. History has the list."
+    except Exception as error:      # whatever it is, nobody is watching: it goes in History, and the week is over
+        remember("Safe clean, by itself", "auto", [], 0, "failed",
+                 f"It could not run this week: {sentence(getattr(error, 'strerror', None) or repr(error))}")
+        return None
+    finally:
+        JOB.update(running=False, current=None)
+        lock.close()
 
 
 def watch_check(now=None):
     """The agent's half-hourly check: one free-space reading, and the notifications worth sending.
-    Never deletes anything."""
-    now = now or time.time()
+    It deletes nothing, with one exception that is off unless switched on: "Run Safe clean by
+    itself once a week" (see clean_alone)."""
+    now = now or clock()
     chosen, free = settings(), disk_free_kb()
     add_sample(free, now)
     state = load_state("watch.json", {})
@@ -3859,16 +4416,25 @@ def watch_check(now=None):
         if now - last_at >= 6 * 3600 or (isinstance(last_free, int) and free * 1024 <= last_free * 1024 - 5e9):
             notes.append((f"Only {size_text(free)} free", "Open headroom to make room."))
             state.update(alert_at=now, alert_free=free)
-    if chosen["weekly"]:
+    if chosen["weekly"] or chosen["auto"]:
         last = state.get("weekly_at")
         if not isinstance(last, (int, float)):
             state["weekly_at"] = now                     # the first week starts now
         elif now - last >= 7 * DAY and 10 <= time.localtime(now).tm_hour < 20:
+            # With its switch on, the weekly run takes the reminder's place: there is nothing left to remind of.
+            done = clean_alone(now, state) if chosen["auto"] else None
+            if done == BUSY_NOW:
+                # A delete is under way, or another check has this week in hand. Nothing is written:
+                # what this check read a moment ago may be older than what that one has saved since.
+                return notes
             state["weekly_at"] = now
-            kb = measure_safe()
-            if kb * 1024 >= 500e6:
-                notes.append((f"Safe clean would free {size_text(kb)}",
-                              "Open headroom to clear it. Nothing goes until you say so."))
+            if done:
+                notes.append(done)
+            elif not chosen["auto"]:
+                kb = measure_safe()
+                if kb * 1024 >= SAFE_WORTH:
+                    notes.append((f"Safe clean would free {size_text(kb)}",
+                                  "Open headroom to clear it. Nothing goes until you say so."))
     save_state("watch.json", state)
     return notes
 
@@ -4375,6 +4941,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return
         DEADLINE = time.time() + IDLE
+        if UPDATING.locked() and self.path not in ("/api/update", "/api/stop"):
+            # A delete (or a move to the Trash, an uninstall, a changed switch) must not begin in a
+            # server that is swapping its own app and about to stop.
+            return self.reply(409, {"error": "headroom is updating itself. Try again in a moment."})
         wanted = data.get("id") if isinstance(data.get("id"), str) else None
         if self.path == "/api/delete":
             wanted = data.get("ids")
@@ -4396,8 +4966,7 @@ class Handler(BaseHTTPRequestHandler):
                 # a promise of the Trash is kept even if the switch was turned off since, and a
                 # switch that is on is never overruled.
                 to_trash = settings()["trash"] or data.get("trash") is True
-                JOB.update(running=True, stopping=False, total_kb=sum(r["kb"] for r in rows), done_kb=0,
-                           item_kb=0, index=0, count=len(rows), current=None, results=[], trash=to_trash)
+                begin_job(rows, to_trash)
             threading.Thread(target=run_job, args=(rows, to_trash), daemon=True).start()
             return self.reply(200, {"started": True})
         if self.path == "/api/stop":
@@ -4417,7 +4986,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, trash_extras([(p["id"], p["keep"]) for p in picks]))
         if self.path == "/api/settings":
             current = settings()
-            for key in ("alert", "weekly", "trash", "cloud"):
+            for key in ("alert", "weekly", "trash", "cloud", "auto"):
                 # Where cleaned files go, and what may go, doesn't change under a delete that is running.
                 if isinstance(data.get(key), bool) and not (key in ("trash", "cloud") and JOB["running"]):
                     current[key] = data[key]
@@ -4436,6 +5005,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/snapshots":
             # No dates come from the page: the ones it was last shown are the ones that go.
             return self.reply(200, remove_snapshots())
+        if self.path == "/api/update":
+            # "Update now": the owner's click, with the full session like every call past this point.
+            # Nothing comes from the page: which version, which file and from where are headroom's own.
+            return self.reply(200, update_now())
         if not wanted and self.path in ("/api/protect", "/api/unprotect", "/api/uninstall",
                                         "/api/reveal", "/api/trash", "/api/maintain", "/api/startup"):
             return self.reply(400, {"error": "Send the id of what to act on."})

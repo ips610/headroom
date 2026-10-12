@@ -59,7 +59,29 @@ Only the latest release. If you're on an older one, update first: the fix will b
   files were meant for the Trash.
 - Tasks that need an administrator go through macOS's own password dialog. headroom never sees
   your password.
+- Nothing is deleted on its own, with one exception that is off until you switch it on: "Run Safe
+  clean by itself once a week". Then the half-hourly check that sends the reminders clears
+  caches, logs and old temporary files, and only those. Installers are left for the button. It
+  scans afresh, picks by the same rule as the Safe clean button, and removes through the same
+  code, with every check above. A place it couldn't look at properly is left out. It never runs
+  while a delete is running or twice within seven days, and it has no session and makes none.
+- That run stops at any doubt: settings that can't be read (they count as off), a Never offer
+  list that can't be read (it is not taken for an empty one), a switch that moved while it was
+  scanning, or the date of the run not being saved.
 - It never downloads or installs anything by itself. The update check only reads a version number.
+- **Update now** runs only when you press it, with the same sign-in a delete needs. It downloads
+  over https from this repository's Releases on GitHub and follows redirects only to GitHub's own
+  hosts. The check that matters is the signature: the new app must satisfy the designated
+  requirement of the app that is running (the same identifier, signed with the same certificate),
+  and be a newer version of the same app. The checksum only catches a broken download. If
+  anything fails, the installed app is left exactly as it was. The old app goes to the Trash, not
+  deleted. An app signed ad hoc has no signer to hold the new one to, so it isn't offered the
+  button.
+- A zip carries more than files: modes, access lists, and its own word on how big it unpacks.
+  The signature covers none of that. So before the signature is checked, every access list is
+  removed and nobody but you may write to any of it, and while it unpacks the folder is measured
+  and the unpacking stopped when it grows past what headroom could be.
+- While an update is under way, and until the server has stopped afterwards, no delete can start.
 - Each release comes with a `SHA256SUMS` file, and the app is built from pinned, hash-checked tools.
 
 ## What it doesn't protect against

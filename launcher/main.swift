@@ -19,8 +19,9 @@
 //
 // Reminders: an agent the server sets up (local.headroom.watch) starts this program with --watch
 // every half hour. It asks the server program what is worth saying (space running low, or what Safe
-// clean would free once a week), posts that as a notification, and exits. No Dock icon, and
-// nothing is ever deleted. Clicking a notification opens headroom's page.
+// clean would free once a week), posts that as a notification, and exits. No Dock icon. Nothing
+// is deleted here, and the server program deletes nothing in this check either unless "Run Safe
+// clean by itself once a week" was switched on. Clicking a notification opens headroom's page.
 import AppKit
 import UserNotifications
 
@@ -277,11 +278,23 @@ enum Door {
     // Writes and loads the agent for wherever this app now lives, but only for a copy installed
     // in Applications. A copy run from Downloads, a build folder, a disk image or App
     // Translocation must not point the agents at a path that won't last.
+    //
+    // Installed means the app itself sits in an Applications folder, not somewhere below one.
+    // "Update now" sets the old app aside in a folder beside the new one (/Applications/
+    // .headroom-update-…/previous/headroom.app) when it can't be moved to the Trash: opened from
+    // there, it must not point the agents at itself.
+    static func installed(_ program: String) -> Bool {
+        let real = (program as NSString).resolvingSymlinksInPath
+        // …/headroom.app/Contents/MacOS/headroom-app: three up is the app, one more the folder it is in.
+        var folder = real as NSString
+        for _ in 0..<4 { folder = folder.deletingLastPathComponent as NSString }
+        let homes = (NSHomeDirectory() + "/Applications" as NSString).resolvingSymlinksInPath
+        return (folder as String == "/Applications" || folder as String == homes) && !real.contains("/AppTranslocation/")
+    }
+
     static func install() -> Bool {
         let program = (Bundle.main.executablePath ?? CommandLine.arguments[0] as NSString as String)
-        let real = (program as NSString).resolvingSymlinksInPath
-        let installed = real.hasPrefix("/Applications/") || real.hasPrefix(NSHomeDirectory() + "/Applications/")
-        if !installed || real.contains("/AppTranslocation/") {
+        if !installed(program) {
             return false
         }
         PortDoor.install(program: program)

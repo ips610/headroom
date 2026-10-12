@@ -5,8 +5,9 @@ headroom finds caches and leftover files, shows how much space each one takes, a
 what you tick.
 
 It runs as a small page in your browser at `headroom.localhost`. Nothing about your files leaves
-your Mac, and nothing goes until you confirm. The only thing it ever asks the internet is whether
-there's a new version.
+your Mac, and nothing goes until you confirm. (One switch lets it clear caches, logs and old temp
+files by itself once a week. It is off until you turn it on.) The only things it asks the
+internet are whether there's a new version and, when you press Update now, for that version.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/clean-dark.png">
@@ -18,8 +19,9 @@ there's a new version.
 - **Cleaning**
   - Finds caches, logs, temp files, old installers, developer tool caches and build folders.
   - Finds what apps you already deleted left behind.
-  - Shows the size of each. Deletes only what you tick, after you confirm, and can be stopped.
+  - Shows the size of each. On the page it deletes only what you tick, after you confirm. A run can be stopped.
   - **Safe clean** picks only what can't hurt, in two clicks.
+  - Can clear caches, logs and old temp files by itself once a week. Off until you switch it on.
   - Packs a big `.git` folder with `git gc` instead of deleting anything.
   - A switch sends cleaned files to the Trash instead of deleting them.
   - **Never offer** hides a row you always want to keep.
@@ -38,13 +40,13 @@ there's a new version.
   - Lists what starts with your Mac. You can turn your own items off and on again.
 - **Maintenance**
   - Refreshes Quick Look, flushes DNS, rebuilds the icon cache or the Spotlight index.
-  - Says when a new version is out.
+  - Says when a new version is out. **Update now** installs it for you.
 - **History and what grew**
   - A list of everything it removed, and a chart of free space over time.
   - What grew since about a week ago, so you see what is eating the disk.
 - **Reminders**
   - A notification when space runs low, and one a week when Safe clean is worth running.
-  - Nothing is ever deleted on its own.
+  - Nothing is deleted on its own, unless you switch on the weekly Safe clean.
 
 ## Getting started
 
@@ -122,7 +124,8 @@ the Trash itself are greyed out while it's on.
 
 **Safe clean** is for when you just want space back. It picks only what can't hurt: app caches,
 old logs and temp files, the browser copies automated Chrome leaves behind, and installers you
-downloaded over a month ago. You still see the list before anything goes.
+downloaded over a month ago. When you press the button, you still see the list before anything
+goes.
 
 Some rows are held back on purpose:
 
@@ -226,7 +229,7 @@ icon cache, rebuild the Spotlight index. The ones that need your password ask th
 dialog, and headroom never sees it. Rebuilding Spotlight takes hours, so it asks first.
 
 The same tab holds the Move to Trash switch, the switch for iCloud Drive's local copies, the Time
-Machine snapshots, the reminders and the update check.
+Machine snapshots, the reminders, the switch for the weekly Safe clean and the update check.
 
 ### History
 
@@ -245,10 +248,40 @@ it is.
 ### Reminders
 
 headroom tells you when free space drops below 20 GB. Once a week, if Safe clean would free
-500 MB or more, it says how much. It checks every half hour in the background, never repeats
-itself within six hours unless another 5 GB went, and never deletes anything on its own. Click a
-notification and headroom opens. You can turn either reminder off, or change the 20 GB, under
-Maintenance.
+500 MB or more, it says how much. It checks every half hour in the background and never repeats
+itself within six hours unless another 5 GB went. Click a notification and headroom opens. You
+can turn either reminder off, or change the 20 GB, under Maintenance.
+
+The reminders delete nothing. Nothing is deleted on its own at all, unless you turn on the switch
+below them.
+
+### Safe clean by itself, once a week
+
+Off unless you turn it on: Maintenance → **Run Safe clean by itself once a week**.
+
+With it on, the weekly reminder becomes the real thing. At the moment the reminder would have
+come, headroom scans again and clears app caches, logs and old temporary files (the browser
+copies automated Chrome leaves behind are among those). Nothing else. It leaves installers alone,
+even old ones: those are files in Downloads and on your Desktop, and nobody is watching a
+background run, so they wait for the Safe clean button, where you see the list first.
+
+Apart from that it is the same rule and the same code as the button. It follows the Move to
+Trash switch, skips an app that is open, and leaves out what you marked Never offer. It never
+touches anything in the "Check before deleting" group, iCloud files, snapshots or git.
+
+It does nothing when that would free less than 500 MB, nothing while a delete is running, and
+never twice within seven days. A place it couldn't look at properly is left out for that week.
+And it stops at any doubt: settings or a Never offer list it can't read, a switch you moved while
+it was scanning, or a disk so full it can't note down that it ran.
+
+It runs in the same half-hourly background check as the reminders, so the page doesn't have to
+be open. That check only runs while you're logged in and the Mac is awake, and only when headroom
+is installed in Applications. Afterwards a notification says what it freed, and History lists
+every row plus one line saying it ran by itself.
+
+This is new. It is tested against a made-up home folder, but it hasn't been through a real week
+on my own Mac yet. If it does something you didn't expect, History has every row it touched,
+and please [tell me](https://github.com/ips610/headroom/issues).
 
 ## What it cleans
 
@@ -347,9 +380,25 @@ When you open headroom, it asks GitHub whether there's a newer version, at most 
 there is, the top bar says a new version is out, with a **Get it** link. Maintenance → Updates
 has a **Check for updates** button too.
 
-To update, quit headroom (right-click its Dock icon → Quit), download the new zip, unzip it and
-drag headroom into Applications. Click **Replace** when Finder asks. A new download may need
-Open Anyway once more. Your settings, history and "Never offered" list stay.
+The quick way is **Update now**, next to that link. It only runs when you press it. headroom
+downloads the new version from this repository's Releases page on GitHub, checks that it is
+signed the same way as the headroom you're running, and puts it in its place. The version you had
+goes to the Trash under its version's name, like "headroom 1.8.app", so you can get it back. If
+it can't be moved there, the page says exactly where it is and waits for you to read that. Then
+the page loads the new one. If any check fails, nothing changes and the page says why. Nothing
+can be deleted while an update is under way.
+
+Some networks block GitHub's download server. My campus one does: it lets github.com through
+and cuts off the download itself. Then Update now says the download did not arrive and nothing
+changes. Downloading the zip in a browser fails there the same way, so try on another network.
+
+Update now shows up only where that check is possible: headroom runs from its app, the app is
+signed with a certificate, and you're allowed to change the folder it is in. A copy you built
+yourself without my certificate doesn't get the button, only the link.
+
+To update by hand, quit headroom (right-click its Dock icon → Quit), download the new zip, unzip
+it and drag headroom into Applications. Click **Replace** when Finder asks. A new download may
+need Open Anyway once more. Either way, your settings, history and "Never offered" list stay.
 
 ### Uninstalling
 

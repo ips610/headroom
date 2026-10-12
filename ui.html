@@ -980,7 +980,8 @@ const named = (count, meta) => `${count} ${meta.noun}`;
 // Rows that can be picked now: confirmed by this launch's scan, not blocked, not part of a delete.
 const free = row => !row.stale && !row.blocked && !row.status;
 const chosenRows = () => allRows().filter(row => row.checked && free(row)).sort(bySize);
-const safeRows = () => allRows().filter(row => row.safe && !row.recent && free(row));
+// `safe` is the server's one rule for what Safe clean takes; the weekly run by itself goes by the same.
+const safeRows = () => allRows().filter(row => row.safe && free(row));
 // Still measuring, as far as the page as a whole goes. A slow source (Homebrew, Docker, the
 // simulators: each waits on another program) doesn't count: its rows fill in when it answers.
 const scanningNow = () => S.starting || S.sources.some(source => S.pending.has(source.id) && !source.slow);
@@ -1852,7 +1853,7 @@ function askDelete(safe) {
 }
 
 function safeClean() {
-  for (const row of S.rows.values()) row.checked = row.safe && !row.recent && free(row);
+  for (const row of S.rows.values()) row.checked = row.safe && free(row);
   S.justFreed = null;
   render();
   askDelete(true);
@@ -2452,9 +2453,9 @@ async function runTask(task) {
 /* ---------- history ---------- */
 
 const RESULT_TEXT = { deleted: 'Deleted', partly: 'Partly done', failed: 'Not done', trashed: 'Moved to the Trash',
-  compacted: 'Packed with git gc', 'turned-off': 'Turned off', 'turned-on': 'Turned on' };
+  compacted: 'Packed with git gc', 'turned-off': 'Turned off', 'turned-on': 'Turned on', ran: 'Ran by itself' };
 const SECTION_TEXT = { ...Object.fromEntries(GROUPS.map(g => [g.id, g.title])), uninstall: 'Uninstalled', disk: 'Disk explorer',
-  duplicates: 'Duplicates', startup: 'Startup', snapshots: 'Maintenance' };
+  duplicates: 'Duplicates', startup: 'Startup', snapshots: 'Maintenance', auto: 'Weekly Safe clean', update: 'Update' };
 
 function when(at) {
   const date = new Date(at);
@@ -2480,7 +2481,7 @@ async function loadHistory() {
   $('h-list').replaceChildren(...entries.map(entry => {
     const paths = Array.isArray(entry.paths) ? entry.paths : [];
     const where = entry.command || (paths.length ? paths[0] + (paths.length > 1 ? ` and ${paths.length - 1} more` : '') : '');
-    const ok = ['deleted', 'trashed', 'compacted', 'evicted', 'asked'].includes(entry.result);
+    const ok = ['deleted', 'trashed', 'compacted', 'evicted', 'asked', 'ran'].includes(entry.result);
     const main = el('div', {},
       el('p', { class: 'mono h-when', text: [when(entry.at), SECTION_TEXT[entry.section] || ''].filter(Boolean).join(' · ') }),
       el('p', { class: 'item-name', text: String(entry.what || '') }),
@@ -2733,6 +2734,7 @@ async function saveSettings(change) {
 }
 
 const CLOUD_SWITCH = 'Offer local copies of iCloud Drive files';
+const AUTO_SWITCH = 'Run Safe clean by itself once a week';
 
 function renderReminders() {
   const data = RM.data;
@@ -2761,8 +2763,11 @@ function renderReminders() {
       el('p', {}, 'A notification when free space drops below ', choose, '. headroom checks every half hour, and says it again only after six hours or another 5 GB gone.')),
       toggle('alert', 'Tell me when space runs low')),
     el('li', { class: 'task' }, el('div', {}, el('h3', {}, 'Weekly Safe clean reminder'),
-      el('p', { text: 'Once a week, if Safe clean would free 500 MB or more, a notification says how much. Nothing is ever deleted on its own.' })),
+      el('p', { text: 'Once a week, if Safe clean would free 500 MB or more, a notification says how much. Nothing is deleted on its own, unless you turn on the switch below.' })),
       toggle('weekly', 'Weekly Safe clean reminder')),
+    el('li', { class: 'task' }, el('div', {}, el('h3', {}, AUTO_SWITCH),
+      el('p', { text: 'Off unless you turn it on. Once a week, when the reminder would come, headroom clears app caches, logs and old temporary files, and nothing else. Installers stay: those wait for the Safe clean button, where you see the list first. Only when it frees 500 MB or more, and never while a delete is running. It follows the Move to Trash switch and leaves out what you marked Never offer. It happens in headroom’s half-hourly background check, so this page need not be open, and not while the Mac is asleep or off. A notification says what it freed, and History lists it.' })),
+      toggle('auto', AUTO_SWITCH)),
   ];
   if (!data.available) lines.push(quietLine(icon('info'), 'Reminders work when headroom runs from Applications.'));
   $('reminders').replaceChildren(...lines);
@@ -2823,7 +2828,7 @@ async function removeSnapshots() {
 /* ---------- updates (top bar + Maintenance tab) ---------- */
 
 // The app asks GitHub at most once a day; the button asks now.
-const UP = { data: null, busy: false };
+const UP = { data: null, busy: false, updating: false, said: '' };
 
 async function checkUpdate(force) {
   UP.busy = true;
@@ -2837,22 +2842,82 @@ async function checkUpdate(force) {
   renderUpdate();
 }
 
+// "Update now": only this click starts it. headroom downloads the release itself, checks that it
+// is signed the way the running app is, and swaps it in. The page sends nothing but the request.
+async function updateNow() {
+  if (UP.updating) return;
+  Object.assign(UP, { updating: true, said: '' });
+  renderUpdate();
+  let out;
+  try {
+    out = await api('/api/update', {});
+  } catch (error) {
+    UP.updating = false;
+    if (error instanceof TypeError) return error instanceof AppClosed ? null : showGone();
+    out = { ok: false, text: error.message };
+  }
+  UP.updating = false;
+  if (out.ok) return awaitNew(String(out.version), String(out.text || ''), out.trashed === true);
+  UP.said = String(out.text || 'The update did not finish.');
+  renderUpdate();
+  announce(UP.said);
+}
+
+// The new app is in place and this server is stopping. The page waits for the new one to answer
+// (its page carries another launch id), says so, and loads it. `text` is the server's own account
+// of where the old app went. When that is not the Trash, the words stay until they are dismissed.
+async function awaitNew(version, text, trashed) {
+  showGone(`Updating to ${version}`, 'The new version is starting. This page loads it in a moment.');
+  for (let attempt = 0; attempt < 60; attempt++) {
+    await sleep(1000);
+    try {
+      const reply = await fetch('/', { cache: 'no-store' });
+      const launch = /name="headroom-run" content="([^"]*)"/.exec(await reply.text());
+      if (reply.ok && launch && launch[1] !== RUN) {
+        $('gone-title').textContent = `Updated to ${version}`;
+        announce(`Updated to ${version}. ${text}`);
+        if (trashed) {
+          $('gone-text').textContent = `${text} This page loads the new one now.`;
+          await sleep(2500);
+          return location.reload();
+        }
+        const open = el('button', { type: 'button', class: 'btn btn-ink', key: 'open-new', text: `Open headroom ${version}`, onclick: () => location.reload() });
+        $('gone-text').replaceChildren(text, '\n\n', open);       // in the same paragraph, which keeps line breaks
+        return open.focus();
+      }
+    } catch (error) { /* not answering yet */ }
+  }
+  $('gone-title').textContent = `headroom ${version} is installed`;
+  $('gone-text').textContent = `It did not start by itself. Open headroom from Applications. ${text}`;
+}
+
 function renderUpdate() {
   const data = UP.data;
   const link = text => el('a', { href: data.url, target: '_blank', rel: 'noopener', text });
+  // Offered only where headroom can check the new app against its own signature; otherwise the link is all there is.
+  const can = Boolean(data && data.newer && data.can_update);
   $('st-update').hidden = !(data && data.newer);
-  if (data && data.newer) $('st-update').replaceChildren(`headroom ${data.latest} is out ·`, link('Get it'));
+  if (data && data.newer) $('st-update').replaceChildren(...[`headroom ${data.latest} is out ·`, link('Get it'),
+    can && '·', can && el('button', { type: 'button', class: 'link', key: 'update-top', disabled: UP.updating,
+      text: UP.updating ? 'Updating…' : 'Update now', onclick: updateNow })].filter(Boolean));
   let note;
   if (UP.busy) note = el('p', {}, 'Checking GitHub…');
   else if (!data) note = el('p', {}, 'headroom looks for a new version on GitHub once a day.');
+  else if (can) note = el('p', {}, `headroom ${data.latest} is out. Update now downloads it from GitHub, checks that it is signed the way this one is, and puts it in this one’s place. The version you have goes to the Trash, and your settings and history stay. Or `,
+    link(`get headroom ${data.latest}`), ' yourself.');
   else if (data.newer) note = el('p', {}, `headroom ${data.latest} is out. `, link(`Get headroom ${data.latest}`),
     ', unzip it and drag it into Applications over this one. Your settings and history stay.');
   else if (data.error) note = el('p', { class: 'done-note bad' }, icon('warn'), el('span', { text: data.error }));
   else note = el('p', { class: 'done-note' }, icon('check'), el('span', { text: 'You have the newest version.' }));
-  $('updates').replaceChildren(el('li', { class: 'task' },
-    el('div', {}, el('h3', {}, data ? `headroom ${data.current}` : 'headroom'), note),
-    el('button', { type: 'button', class: 'btn btn-ghost sm', disabled: UP.busy,
-      text: UP.busy ? 'Checking…' : 'Check for updates', onclick: () => checkUpdate(true) })));
+  const main = el('div', {}, el('h3', {}, data ? `headroom ${data.current}` : 'headroom'), note);
+  if (UP.updating) main.append(el('p', {}, spinner(), ' Downloading and checking. This can take a minute.'));
+  if (UP.said) main.append(el('p', { class: 'done-note bad' }, icon('warn'), el('span', { text: UP.said })));
+  $('updates').replaceChildren(el('li', { class: 'task' }, main,
+    el('div', { class: 'item-side' },
+      can && el('button', { type: 'button', class: 'btn btn-ink sm', key: 'update-now', disabled: UP.updating || UP.busy,
+        text: UP.updating ? 'Updating…' : 'Update now', onclick: updateNow }),
+      el('button', { type: 'button', class: 'btn btn-ghost sm', disabled: UP.busy || UP.updating,
+        text: UP.busy ? 'Checking…' : 'Check for updates', onclick: () => checkUpdate(true) }))));
 }
 
 /* ---------- free space over time (History tab) ---------- */

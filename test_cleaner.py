@@ -15,6 +15,7 @@ import plistlib
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -37,11 +38,11 @@ outside = os.path.join(box, "outside")
 spawn = cleaner.run
 
 
-def real_run(command, timeout=None, input=None):
+def real_run(command, timeout=None, input=None, watch=None):
     """Every program the tests start goes through here. A login code must never be on a command
     line, where `ps` shows it to every account on the Mac."""
     assert not any("?k=" in str(part) for part in command), command
-    return spawn(command, timeout, input)
+    return spawn(command, timeout, input, watch)
 
 
 cleaner.run = real_run
@@ -102,9 +103,14 @@ class Recorder:
         self.calls, self.returncode, self.stderr, self.answer, self.fakes = [], returncode, stderr, answer, fakes
         self.inputs = []        # what each recorded command was given to read
         self.never = never
+        # Programs that were started although they must not be. The assertion below stops them, but
+        # code that catches every error (the weekly run does) would swallow it: recording() looks here too.
+        self.forbidden = []
 
-    def __call__(self, command, timeout=None, input=None):
+    def __call__(self, command, timeout=None, input=None, watch=None):
         assert not any("?k=" in str(part) for part in command), command
+        if command[0] in self.never:
+            self.forbidden.append(command)
         assert command[0] not in self.never, command
         if command[0] in ("/usr/bin/osascript", "/usr/bin/open", "/usr/bin/qlmanage", "/usr/bin/mdls",
                           "/bin/launchctl", "/usr/bin/env") + tuple(self.fakes):
@@ -114,8 +120,10 @@ class Recorder:
             if command[:3] == ["/usr/bin/osascript", "-e", cleaner.TRASH_SCRIPT] and not code and not out:
                 out = "0\n" * len(command[3:])       # Finder: every one of them moved
             return subprocess.CompletedProcess(command, code, out, self.stderr)
+        if not (command[0] in ("/usr/bin/du", "/bin/ps", "/bin/rm") or command[0].endswith("/git")):
+            self.forbidden.append(command)
         assert command[0] in ("/usr/bin/du", "/bin/ps", "/bin/rm") or command[0].endswith("/git"), command
-        return real_run(command, timeout, input)
+        return real_run(command, timeout, input, watch)
 
 
 @contextlib.contextmanager
@@ -125,6 +133,7 @@ def recording(recorder):
         yield recorder
     finally:
         cleaner.run = real_run
+    assert not recorder.forbidden, ("a program that must not be started was started", recorder.forbidden)
 
 
 def fresh():
@@ -893,7 +902,7 @@ try:
     cleaner.startup_dirs = real_dirs
 
     # --- reminders: the agent's check, with a stand-in for statfs ---------------------------------
-    assert cleaner.settings() == {"alert": True, "weekly": True, "alert_gb": 20, "trash": False, "cloud": False}, \
+    assert cleaner.settings() == {"alert": True, "weekly": True, "alert_gb": 20, "trash": False, "cloud": False, "auto": False}, \
         "reminders on by default, below 20 GB; Move to Trash off"
     free = [12e9 / 1024]
     cleaner.disk_free_kb = lambda: int(free[0])
@@ -938,6 +947,7 @@ try:
     with recording(Recorder(returncode=1)) as recorder:
         cleaner.sync_watch()
     assert recorder.calls == [] and not os.path.exists(watch_plist), "no app launcher here: left alone"
+    real_launcher_program = cleaner.launcher_program
     cleaner.launcher_program = lambda: "/Applications/headroom.app/Contents/MacOS/headroom-app"
     with recording(Recorder(returncode=1)) as recorder:
         cleaner.sync_watch()
@@ -2681,6 +2691,28 @@ try:
             os.environ["HOME"] = env_home
             cleaner.CLOUD_ROOTS[:] = []
 
+        # The launcher's own rule for "installed", built into a little program of its own and asked:
+        # the app itself in an Applications folder counts, a copy anywhere below one does not. (An
+        # update sets the old app aside in /Applications/.headroom-update-…/previous.)
+        import pwd
+        launcher_source = open(os.path.join(os.path.dirname(os.path.abspath(cleaner.__file__)), "launcher", "main.swift")).read()
+        rule = re.search(r"    static func installed\(_ program: String\) -> Bool \{\n(.*?)\n    \}\n", launcher_source, re.S)
+        assert rule and 'hasPrefix("/Applications/")' not in launcher_source and "if !installed(program) {" in launcher_source
+        rule_program = os.path.join(box, "built", "installed")
+        with open(rule_program + ".swift", "w") as handle:
+            handle.write("import Foundation\nfunc installed(_ program: String) -> Bool {\n" + rule.group(1)
+                         + "\n}\nfor path in CommandLine.arguments.dropFirst() { print(installed(path)) }\n")
+        made = subprocess.run([swiftc, "-O", "-sdk", sdk, "-target", f"{platform.machine()}-apple-macos12", "-o", rule_program,
+                               rule_program + ".swift"], capture_output=True, text=True)
+        assert made.returncode == 0, made.stderr
+        own_home = pwd.getpwuid(os.getuid()).pw_dir
+        asked = [("/Applications/Probe.app", True), (own_home + "/Applications/Probe.app", True),
+                 ("/Applications/.headroom-update-abc123/previous/Probe.app", False), ("/Applications/Utilities/Probe.app", False),
+                 (own_home + "/Downloads/Probe.app", False), (own_home + "/Applications/Old/Probe.app", False),
+                 ("/private/var/folders/xy/AppTranslocation/ABCD/d/Probe.app", False), ("/Applications", False)]
+        said = subprocess.run([rule_program] + [where + "/Contents/MacOS/probe" for where, _ in asked], capture_output=True, text=True)
+        assert said.stdout.split() == [str(counts).lower() for _, counts in asked], (said.stdout, said.stderr)
+
     # --- the port the app's launcher keeps for headroom is tried first ---------------------------------
     port_file = os.path.join(cleaner.state_dir(), "port")
     assert cleaner.reserved_port() is None, "no file: nothing kept, the usual ports"
@@ -3025,8 +3057,12 @@ try:
     assert call("/api/settings")[1]["alert_gb"] == 20
     with recording(Recorder()) as recorder:
         assert call("/api/settings", body={"alert": False, "alert_gb": 15})[1] == {
-            "alert": False, "weekly": True, "alert_gb": 15, "trash": False, "cloud": False, "available": True}
+            "alert": False, "weekly": True, "alert_gb": 15, "trash": False, "cloud": False, "auto": False, "available": True}
         assert call("/api/settings", body={"alert_gb": 99999})[1]["alert_gb"] == 15, "a silly number is ignored"
+        # "Run Safe clean by itself once a week" is a setting like the others, and off until it is switched on.
+        assert call("/api/settings", body={"auto": True})[1]["auto"] is True and cleaner.settings()["auto"] is True
+        assert call("/api/settings", body={"auto": "yes"})[1]["auto"] is True, "anything but true or false is ignored"
+        assert call("/api/settings", body={"auto": False})[1]["auto"] is False and cleaner.settings()["auto"] is False
     assert recorder.calls and all(c[0] == "/bin/launchctl" for c in recorder.calls)
     space = call("/api/space")[1]
     assert space["samples"] and space["total_kb"] > 0
@@ -3078,7 +3114,7 @@ try:
         # While a delete runs, where things go can't be changed under it.
         cleaner.JOB["running"] = True
         assert call("/api/settings", body={"trash": False, "alert_gb": 25})[1] == {
-            "alert": False, "weekly": True, "alert_gb": 25, "trash": True, "cloud": False, "available": True}
+            "alert": False, "weekly": True, "alert_gb": 25, "trash": True, "cloud": False, "auto": False, "available": True}
         cleaner.JOB["running"] = False
         assert call("/api/settings", body={"trash": False, "alert_gb": 15})[1]["trash"] is False
     assert [c for c in recorder.calls if c[0] == "/usr/bin/osascript"] == [finder + [on_cache]]
@@ -3195,6 +3231,26 @@ try:
     cleaner.CLOUD, cleaner.dataless, cleaner.clock = None, earlier_dataless, time.time
     cleaner.FOUND.pop("cloud", None)
     cleaner.CLOUD_ROOTS[:] = []
+
+    # "Update now" over the API: the full session, like deleting, and nothing the page sends is used.
+    real_update, pressed = cleaner.update_now, []
+    cleaner.update_now = lambda: pressed.append(1) or {"ok": False, "text": "Stood in for."}
+    for refused in ({"cookie": None}, {"key": None}, {"run": "0123456789abcdef"}, {"host": "evil.example:80"}):
+        assert call("/api/update", body={}, **refused)[0] == call("/api/delete", body={"ids": ["x"]}, **refused)[0] != 200, refused
+    assert pressed == [], "nobody but the signed-in page starts an update"
+    assert call("/api/update", body={"version": "0.1", "url": "https://evil.example/x.zip"})[1] == {"ok": False, "text": "Stood in for."}
+    assert pressed == [1] and call("/api/update")[1]["can_update"] is False, "from source there is no app to swap: only the link"
+    cleaner.update_now = real_update
+    # While an update is under way (and after its swap, until the server stops) nothing else starts:
+    # not a delete, not a move to the Trash, not a changed switch. Reading still works.
+    cleaner.UPDATING.acquire()
+    for path_, body in (("/api/delete", {"ids": ["x"]}), ("/api/settings", {"trash": True}), ("/api/trash", {"id": "x"}),
+                        ("/api/uninstall", {"id": "x"}), ("/api/snapshots", {}), ("/api/dupes/trash", {"groups": []})):
+        status, got, _ = call(path_, body=body)
+        assert status == 409 and got == {"error": "headroom is updating itself. Try again in a moment."}, (path_, status, got)
+    assert call("/api/settings")[0] == 200 and call("/api/progress")[0] == 200 and cleaner.settings()["trash"] is False
+    cleaner.UPDATING.release()
+    assert call("/api/delete", body={"ids": ["x"]})[0] == 404, "and afterwards a delete is a delete again"
 
     # Time Machine's local snapshots over the API. The page cannot name one: whatever it sends,
     # the snapshots it was last shown are the ones that go.
@@ -3343,6 +3399,835 @@ try:
         assert info["latest"] is None and not info["newer"], info
     finally:
         cleaner.newest_release = real_newest
+    # --- Safe clean by itself, once a week: off unless switched on, and then the button's own pick and removal ---
+    # Last in this file: it really clears the made-up home's caches.
+    cleaner.SAFE_WORTH = 300 * 1024                     # bytes: small made-up files count here
+    week = 7 * cleaner.DAY
+    tuesday = time.mktime((2027, 3, 2, 11, 0, 0, 0, 0, -1))
+    now = [tuesday]
+    cleaner.clock = lambda: now[0]
+    settings_path = os.path.join(cleaner.state_dir(), "settings.json")
+
+    def switched(**switches):
+        cleaner.save_state("settings.json", {"alert": False, "weekly": True, "alert_gb": 20, **switches})
+
+    def week_is_up(**state):
+        cleaner.save_state("watch.json", {"weekly_at": now[0] - week - 60, **state})
+
+    def stock():
+        """Things Safe clean takes, and things beside them that it must not."""
+        takes = [os.path.dirname(put("Library", "Caches", "com.weekly.big", "blob", kb=500)),
+                 os.path.dirname(put("Library", "Caches", "com.weekly.other", "blob", kb=300))]
+        old_installer = put("Downloads", "Old-Tool-1.0.dmg", kb=400)        # the button offers it; the run by itself leaves it
+        age(old_installer, 60)
+        stays = [old_installer, put("Downloads", "Brand-New.dmg", kb=400),                   # and an installer from today
+                 os.path.dirname(put("Library", "Caches", "pip", "http", "blob", kb=300)),   # a developer tool's cache
+                 put("Documents", "weekly", "thesis.zip", kb=300), put("Documents", "weekly", "model.gguf", kb=300),
+                 put("Library", "Application Support", "com.weekly.big", "settings.db", kb=50), film, kept_outside]
+        return takes, stays
+    # The one rule. Never a row used this week, one a command clears, a git history, or an iCloud file's copy.
+    for group, safe, extra, expected in (
+            ("apps", False, {}, True), ("temp", False, {}, True), ("installers", True, {}, True), ("installers", False, {}, False),
+            ("apps", False, {"recent": True}, False), ("apps", False, {"evict": True}, False), ("apps", False, {"git": "/repo"}, False),
+            ("apps", False, {"cmd": ["/bin/true"]}, False), ("cloud", False, {"evict": True}, False), ("dev", False, {}, False),
+            ("trash", False, {}, False), ("builds", False, {}, False), ("leftovers", False, {}, False), ("big", False, {}, False),
+            ("models", False, {}, False), ("archives", False, {}, False), ("shots", False, {}, False), ("mail", False, {}, False)):
+        made = cleaner.item(group, "x", ["/x"], 9000)
+        made.update(safe=safe, **extra)
+        assert cleaner.safe_row(made) is expected and cleaner.public(made, "")["safe"] is expected, (group, safe, extra)
+        # By itself it takes the same, less the installers: caches, logs and old temporary files only.
+        assert cleaner.safe_row(made, alone=True) is (expected and group != "installers"), (group, safe, extra)
+    # And no place outside the ones the weekly run scans can hold such a row: its list of places can't fall behind the rule.
+    takes, stays = stock()
+    for name, (_, source_scan) in cleaner.SOURCES.items():
+        if name in cleaner.SAFE_SOURCES or name in ("simulators", "homebrew", "docker"):     # those three only list commands
+            continue
+        found = spotlit(source_scan) if name in ("screenshots", "models", "archives") else (
+            clouded(source_scan)[:2] if name in ("cloud", "attachments") else source_scan())
+        assert not [row["name"] for row in (found[0] if isinstance(found, tuple) else found) if cleaner.safe_row(row)], name
+    # What the weekly run picks is what the button would pick, less the installers. Their folders aren't even listed.
+    real_installers, listed_installers = cleaner.SOURCES["installers"], []
+    cleaner.SOURCES["installers"] = (real_installers[0], lambda: listed_installers.append(1) or real_installers[1]())
+    with recording(Recorder(never=("/bin/rm",))):
+        picked, left_out = cleaner.safe_rows(False)
+        assert listed_installers == [], "the run by itself does not look into Downloads or the Desktop for installers"
+        on_page = [r for s in cleaner.SAFE_SOURCES for r in cleaner.scan(s)["items"] if r["safe"] and not r["blocked"]]
+    cleaner.SOURCES["installers"] = real_installers
+    assert "Old-Tool-1.0.dmg" in [r["name"] for r in on_page if r["group"] == "installers"], "the button still offers an old installer"
+    assert sorted(row["id"] for row in picked) == sorted(r["id"] for r in on_page if r["group"] != "installers") and left_out == 0
+    assert len(picked) >= 2 and all(row["group"] in ("apps", "temp") for row in picked)
+    assert {p for p in takes} <= {p for row in picked for p in row["paths"]}
+    assert not {p for row in picked for p in row["paths"]} & set(stays)
+    assert all(cleaner.deletable(p) for row in picked for p in row["paths"]) and not any(row["cmd"] or row["evict"] for row in picked)
+    # A cache whose app is open is greyed out on the page, so the button can't pick it. Nor does this.
+    real_blocked = cleaner.blocked
+    cleaner.blocked = lambda row, running: "Quit it first" if row["name"] == "big" else real_blocked(row, running)
+    with recording(Recorder(never=("/bin/rm",))):
+        held_back = [row["name"] for row in cleaner.safe_rows(False)[0]]
+    cleaner.blocked = real_blocked
+    assert "big" in [row["name"] for row in picked] and "big" not in held_back and len(held_back) == len(picked) - 1
+    # Any job holds the one lock while it runs, so headroom's other program can see it and wait.
+    probe = cleaner.item("apps", "lock probe", [put("Library", "Caches", "com.weekly.probe", kb=10)], 10)
+    probe["trash"], held_while = True, []
+    with recording(Recorder(answer=lambda command: (held_while.append(cleaner.job_lock(wait=False)), (0, ""))[1], never=("/bin/rm",))):
+        cleaner.JOB.update(results=[], done_kb=0, stopping=False)
+        cleaner.run_job([probe])
+    assert held_while == [None] and cleaner.job_lock(wait=False) is not None, "held during the job, let go after it"
+    os.remove(probe["paths"][0])
+    session_before = (open(os.path.join(cleaner.state_dir(), "session.json")).read(), dict(cleaner.CODES), dict(cleaner.SESSION))
+    history_lines = lambda: len(cleaner.history(10 ** 6))
+
+    def nothing_went(why):
+        assert all(os.path.exists(p) for p in takes + stays), why
+    # Off by default: the week is up, the reminder comes as it always did, and nothing is deleted.
+    switched()
+    week_is_up()
+    with recording(Recorder(never=("/bin/rm", "/usr/bin/osascript"))) as recorder:
+        assert cleaner.watch_check() == [("Safe clean would free 3.2 GB", "Open headroom to clear it. Nothing goes until you say so.")]
+    nothing_went("off by default")
+    # Settings that can't be read, or say anything but a plain yes: off.
+    for unreadable in ("{", "[]", '{"auto": "yes"}', '{"auto": 1}', '{"auto": null}', '{"weekly": true, "auto": false}'):
+        with open(settings_path, "w") as handle:
+            handle.write(unreadable)
+        assert cleaner.settings()["auto"] is False, unreadable
+        week_is_up()
+        with recording(Recorder(never=("/bin/rm", "/usr/bin/osascript"))):
+            cleaner.watch_check()
+        nothing_went(unreadable)
+    # On, and the week not up yet, or up at three in the morning: not now.
+    switched(auto=True)
+    cleaner.save_state("watch.json", {"weekly_at": now[0] - week + 3600})
+    with recording(Recorder(never=("/bin/rm",))):
+        assert cleaner.watch_check() == []
+    week_is_up()
+    with recording(Recorder(never=("/bin/rm",))):
+        assert cleaner.watch_check(time.mktime((2027, 3, 2, 3, 0, 0, 0, 0, -1))) == [], "the reminder would not have come at night either"
+    nothing_went("not the moment")
+    # Below the reminder's own mark: nothing is done and nothing is said. The week counts as looked at.
+    cleaner.SAFE_WORTH = 10 ** 12
+    cleaner.save_state("watch.json", {"weekly_at": now[0] - week - 60})
+    lines_before = history_lines()
+    with recording(Recorder(never=("/bin/rm",))):
+        assert cleaner.watch_check() == []
+    state = cleaner.load_state("watch.json", {})
+    assert state["weekly_at"] == now[0] and "auto_at" not in state and history_lines() == lines_before
+    nothing_went("not worth it")
+    cleaner.SAFE_WORTH = 300 * 1024
+    # Never while another job is running: in this program, or in headroom's other one (the page's
+    # server), which holds the job lock. The week stays up, for the next check.
+    week_is_up()
+    cleaner.JOB["running"] = True
+    with recording(Recorder(never=("/bin/rm",))):
+        assert cleaner.watch_check() == []
+    cleaner.JOB["running"] = False
+    assert cleaner.load_state("watch.json", {})["weekly_at"] == now[0] - week - 60, "not used up: tried again in half an hour"
+    theirs = cleaner.job_lock(wait=False)
+    assert theirs is not None and cleaner.job_lock(wait=False) is None, "one job at a time, across programs"
+    with recording(Recorder(never=("/bin/rm",))):
+        assert cleaner.watch_check() == []
+    theirs.close()
+    nothing_went("another job was running")
+    assert cleaner.load_state("watch.json", {})["weekly_at"] == now[0] - week - 60 and cleaner.JOB["running"] is False
+    # A place whose scan was unsure, or that macOS kept shut, is left out whole. Never offer stays.
+    real_logs, real_extras = cleaner.SOURCES["logs"], cleaner.SOURCES["app_extras"]
+    old_log = put("Library", "Logs", "weekly", "old.log", kb=400)
+    cleaner.SOURCES["logs"] = (real_logs[0], lambda: (real_logs[1](), cleaner.Unsure("headroom could not look properly.")))
+    cleaner.SOURCES["app_extras"] = (real_extras[0], lambda: (real_extras[1](), "macOS keeps this behind Full Disk Access."))
+    with recording(Recorder(never=("/bin/rm",))):
+        other = next(r for r in cleaner.scan("caches")["items"] if r["name"] == "other")
+    never_offered = cleaner.FOUND["caches"][other["id"]]
+    cleaner.protect(never_offered)
+    takes.remove(os.path.dirname(os.path.join(takes[1], "blob")))
+    stays += [os.path.join(cleaner.HOME, "Library", "Caches", "com.weekly.other"), old_log]
+    takes.append(os.path.dirname(put("Library", "Caches", "com.weekly.late", "blob", kb=300)))    # after every listing so far
+    lines_before, charted = history_lines(), sum(kb for _, kb, _ in cleaner.space_history()["marks"])
+    printed, real_argv, real_nice = io.StringIO(), sys.argv, os.nice
+    sys.argv, os.nice = ["cleaner.py", "--watch"], lambda n: 0
+    with recording(Recorder(never=("/usr/bin/osascript",))) as recorder, contextlib.redirect_stdout(printed):
+        cleaner.main()                          # as the reminder's agent starts it: no page, no server
+    sys.argv, os.nice = real_argv, real_nice
+    said = re.fullmatch(r"notify\tSafe clean freed ([\d.]+) (MB|KB)\theadroom ran it by itself\. History has the list\.\n", printed.getvalue())
+    assert said, printed.getvalue()
+    assert not any(os.path.exists(p) for p in takes), "the Safe clean set went"
+    assert all(os.path.exists(p) for p in stays), [p for p in stays if not os.path.exists(p)]
+    assert not any(row["evict"] or row["cmd"] for row in picked) and [c for c in recorder.calls if c[0] not in ("/usr/bin/env",)] == []
+    summary = cleaner.history()[0]
+    assert (summary["what"], summary["section"], summary["result"], summary["paths"]) == ("Safe clean, by itself", "auto", "ran", []), summary
+    assert summary["kb"] >= 800 and re.fullmatch(
+        r"\d+ items cleared\. 2 places were left out, because headroom could not look properly", summary["note"]), summary
+    assert history_lines() > lines_before + 1, "every row is in History as it always is, and one line says it ran by itself"
+    state = cleaner.load_state("watch.json", {})
+    assert state["weekly_at"] == now[0] and state["auto_at"] == now[0] and cleaner.JOB["running"] is False
+    assert cleaner.job_lock(wait=False) is not None, "the lock is let go"
+    assert (open(os.path.join(cleaner.state_dir(), "session.json")).read(), dict(cleaner.CODES), dict(cleaner.SESSION)) == session_before, "no session made or changed"
+    assert sum(kb for _, kb, _ in cleaner.space_history()["marks"]) - charted == summary["kb"], \
+        "the rows are on the chart once: the line that says it ran is not counted a second time"
+    cleaner.SOURCES["logs"], cleaner.SOURCES["app_extras"] = real_logs, real_extras
+    cleaner.unprotect(next(e["id"] for e in cleaner.protected() if e.get("name") == "other"))
+    # Never twice inside seven days: not when the reminder's own date is lost or wound back, and not when the clock is.
+    takes, stays = stock()
+    for label, weekly_at, clock_now in (("six days on", tuesday - week, tuesday + 6 * cleaner.DAY),
+                                        ("the reminder's date lost", None, tuesday + 3 * cleaner.DAY),
+                                        ("the clock set back", tuesday - 30 * cleaner.DAY, tuesday - 2 * cleaner.DAY)):
+        now[0] = clock_now
+        cleaner.save_state("watch.json", {"auto_at": tuesday, **({} if weekly_at is None else {"weekly_at": weekly_at})})
+        with recording(Recorder(never=("/bin/rm", "/usr/bin/osascript"))):
+            assert cleaner.watch_check() == [], label
+        nothing_went(label)
+        if weekly_at is None:
+            now[0] += week + 3600               # the "first week" that then starts is still inside the seven days
+            if time.localtime(now[0]).tm_hour < 10 or time.localtime(now[0]).tm_hour >= 20:
+                now[0] += 12 * 3600
+            assert now[0] - tuesday >= week
+    # A week on, with Move to Trash switched on: the same rows go to Finder, and rm is never run.
+    now[0] = tuesday + week + 60
+    switched(auto=True, trash=True)
+    week_is_up(auto_at=tuesday)
+    binned = os.path.join(box, "weekly-trash")
+    os.makedirs(binned)
+
+    def finder_moves(command):
+        assert command[:3] == finder, command
+        for moved in command[3:]:
+            shutil.move(moved, os.path.join(binned, f"{len(os.listdir(binned))}-{os.path.basename(moved)}"))
+        return 0, "0\n" * len(command[3:])
+    with recording(Recorder(answer=finder_moves, never=("/bin/rm",))) as recorder:
+        notes = cleaner.watch_check()
+    assert len(notes) == 1 and re.fullmatch(r"Safe clean moved [\d.]+ (MB|KB) to the Trash", notes[0][0]), notes
+    assert notes[0][1] == "headroom ran it by itself. Empty the Trash to get the space."
+    assert {p for call in recorder.calls for p in call[3:]} >= set(takes) and not {p for call in recorder.calls for p in call[3:]} & set(stays)
+    assert not any(os.path.exists(p) for p in takes) and all(os.path.exists(p) for p in stays) and len(os.listdir(binned)) >= 3
+    assert cleaner.load_state("watch.json", {})["auto_at"] == now[0]
+    # What could not be cleared is said in History, in plain words, and in the notification.
+    takes, stays = stock()
+    now[0] += week + 60
+    switched(auto=True, trash=True)
+    week_is_up(auto_at=now[0] - week - 60)
+    with recording(Recorder(returncode=1, stderr="execution error: Not authorized to send Apple events to Finder. (-1743)", never=("/bin/rm",))):
+        notes = cleaner.watch_check()
+    assert notes == [("Safe clean ran and freed nothing", "headroom ran it by itself. History says why.")], notes
+    summary = cleaner.history()[0]
+    assert summary["result"] == "failed" and summary["kb"] == 0 and "could not be: headroom isn't allowed to control Finder." in summary["note"], summary
+    nothing_went("Finder was not allowed")
+    # Whatever goes wrong with nobody watching: one line in History, the week is over, and no job is left running.
+    real_rows = cleaner.safe_rows
+    for broke, said in ((OSError(35, "Resource temporarily unavailable"), "It could not run this week: Resource temporarily unavailable."),
+                        (KeyError("kb"), "It could not run this week: KeyError('kb').")):
+        def breaks(to_trash, broke=broke):
+            raise broke
+        cleaner.safe_rows = breaks
+        now[0] += week + 60
+        week_is_up(auto_at=now[0] - week - 60)
+        with recording(Recorder(never=("/bin/rm", "/usr/bin/osascript"))):
+            assert cleaner.watch_check() == []
+        summary, state = cleaner.history()[0], cleaner.load_state("watch.json", {})
+        assert (summary["what"], summary["result"], summary["error"], summary["kb"]) == ("Safe clean, by itself", "failed", said, 0), summary
+        assert state["weekly_at"] == now[0] and state["auto_at"] == now[0] - week - 60 and cleaner.JOB["running"] is False
+        assert cleaner.job_lock(wait=False) is not None
+    cleaner.safe_rows = real_rows
+    nothing_went("the scan broke")
+    # --- what stops it: every doubt, each with the made-up home left as it was -------------------------
+    watch_path = os.path.join(cleaner.state_dir(), "watch.json")
+    protected_path = cleaner.protected_file()
+
+    def due():
+        """The switch on, the week up, seven days since the last run: nothing but the case at hand is in the way."""
+        now[0] += week + 60
+        switched(auto=True)
+        week_is_up(auto_at=now[0] - week - 60)
+
+    def check(**recorder_options):
+        lines = history_lines()
+        with recording(Recorder(**{"never": ("/bin/rm", "/usr/bin/osascript"), **recorder_options})) as recorder:
+            notes = cleaner.watch_check()
+        return notes, cleaner.history()[:history_lines() - lines], recorder
+    # The date of this run can't be saved (a full disk does the same): it would run again at every
+    # check, so it does not run at all. Three checks, nothing cleared.
+    due()
+    os.mkdir(watch_path + ".tmp")           # what save_state writes first can't be made
+    for attempt in range(3):
+        now[0] += 1800
+        notes, said, _ = check()
+        assert notes == [] and said == [], (attempt, notes, said)
+        nothing_went("the date could not be kept")
+    os.rmdir(watch_path + ".tmp")
+    assert "auto_at" in cleaner.load_state("watch.json", {}) and cleaner.load_state("watch.json", {})["auto_at"] < now[0] - week
+    # A Never offer list that can't be read is not an empty one: nothing runs, and History says why.
+    kept_list = open(protected_path).read() if os.path.exists(protected_path) else None
+    for unreadable in ("[{oops", "{}", '[{"id": "x", "keys": "nope"}]', '[{"id": "x", "keys": [1]}]', '["x"]'):
+        due()
+        with open(protected_path, "w") as handle:
+            handle.write(unreadable)
+        assert cleaner.protected_broken(), unreadable
+        notes, said, _ = check()
+        assert notes == [] and [(e["what"], e["result"]) for e in said] == [("Safe clean, by itself", "failed")], (unreadable, said)
+        assert said[0]["error"].startswith("It did not run this week: the Never offer list can't be read"), said
+        nothing_went(unreadable)
+        assert cleaner.load_state("watch.json", {})["weekly_at"] == now[0], "one line a week, not one every half hour"
+    for readable in ("[]", '[{"id": "x", "name": "n", "keys": ["/nowhere"]}]'):
+        with open(protected_path, "w") as handle:
+            handle.write(readable)
+        assert not cleaner.protected_broken(), readable
+    os.remove(protected_path)
+    assert not cleaner.protected_broken(), "no list at all is an empty one"
+    if kept_list is not None:
+        with open(protected_path, "w") as handle:
+            handle.write(kept_list)
+    # A switch that moved while it was scanning counts as it is now. Switched off, or settings
+    # that can't be read any more: it stops. Move to Trash switched on meanwhile: Finder, not rm.
+    real_rows = cleaner.safe_rows
+
+    def meanwhile(change):
+        def scanning(to_trash):
+            rows = real_rows(to_trash)
+            change()
+            return rows
+        return scanning
+    for label, change in (("switched off during the scan", lambda: switched(auto=False)),
+                          ("settings unreadable during the scan", lambda: open(settings_path, "w").write("{"))):
+        due()
+        cleaner.safe_rows = meanwhile(change)
+        notes, said, _ = check()
+        assert notes == [] and said == [], (label, notes, said)
+        nothing_went(label)
+    due()
+    cleaner.safe_rows = meanwhile(lambda: switched(auto=True, trash=True))
+    notes, said, recorder = check(never=("/bin/rm",), answer=finder_moves)
+    cleaner.safe_rows = real_rows
+    assert len(notes) == 1 and notes[0][0].startswith("Safe clean moved ") and [c[:3] for c in recorder.calls] == [finder], (notes, recorder.calls)
+    assert not any(os.path.exists(p) for p in takes) and all(os.path.exists(p) for p in stays)
+    takes, stays = stock()
+    # Two checks that overlap. The second read its notes before the first had saved the date of its
+    # run: with the lock in hand it reads them again, and does not run. And while the first is
+    # still at it (the lock is taken), the second writes nothing at all: its notes are the older ones.
+    due()
+    stale = cleaner.load_state("watch.json", {})
+    real_load = cleaner.load_state
+    cleaner.load_state = lambda name, default: {**real_load(name, default), "auto_at": now[0] - 3600} if name == "watch.json" and "auto_at" in stale else real_load(name, default)
+    lines = history_lines()
+    with recording(Recorder(never=("/bin/rm", "/usr/bin/osascript"))):
+        assert cleaner.clean_alone(now[0], dict(stale)) is None, "the other check ran an hour ago"
+    cleaner.load_state = real_load
+    assert history_lines() == lines, "it did not even start"
+    nothing_went("another check had just run")
+    due()
+    switched(auto=True, alert=True)         # and space is low: this check has something of its own to note down
+    before = open(watch_path).read()
+    theirs = cleaner.job_lock(wait=False)
+    with recording(Recorder(never=("/bin/rm", "/usr/bin/osascript"))):
+        notes = cleaner.watch_check()
+    theirs.close()
+    assert [title for title, _ in notes] == ["Only 1.5 GB free"] and open(watch_path).read() == before, "busy: watch.json is not written"
+    nothing_went("the other check was still running")
+    # An unsure scan with nothing to say is unsure all the same.
+    due()
+    real_caches = cleaner.SOURCES["caches"]
+    cleaner.SOURCES["caches"] = (real_caches[0], lambda: (real_caches[1](), cleaner.Unsure("")))
+    cleaner.SAFE_WORTH = 1
+    notes, said, _ = check(never=("/usr/bin/osascript",))
+    cleaner.SOURCES["caches"], cleaner.SAFE_WORTH = real_caches, 300 * 1024
+    assert all(os.path.exists(p) for p in takes), "the caches' scan was unsure: they are left out whole"
+    takes, stays = stock()
+    # The agent is kept for this switch alone, and the switch is a setting like the others.
+    cleaner.launcher_program = lambda: "/Applications/headroom.app/Contents/MacOS/headroom-app"
+    cleaner.save_state("settings.json", {"alert": False, "weekly": False, "alert_gb": 20, "auto": True})
+    with recording(Recorder(returncode=1)):
+        cleaner.sync_watch()
+    assert os.path.exists(watch_plist), "both reminders off, the weekly run on: the half-hourly check stays"
+    cleaner.save_state("settings.json", {"alert": False, "weekly": False, "alert_gb": 20})
+    with recording(Recorder()):
+        cleaner.sync_watch()
+    assert not os.path.exists(watch_plist)
+    cleaner.clock = time.time
+    for left in takes + stays[:5]:
+        subprocess.run(["/bin/rm", "-rf", "--", left], check=True)
+
+    # --- Update now: the owner's click swaps the app for the newest release, and every doubt stops it -------
+    # GitHub and codesign are stood in for; nothing here goes near the network or /Applications.
+    shelf = os.path.join(box, "Shelf")
+
+    def bundle(folder, version, ident="local.headroom"):
+        made = os.path.join(folder, "headroom.app")
+        put("Contents", "MacOS", "headroom-app", kb=1, root=made)
+        put("Contents", "Resources", "cleaner.py", kb=1, root=made)
+        with open(os.path.join(made, "Contents", "Info.plist"), "wb") as handle:
+            plistlib.dump({"CFBundleIdentifier": ident, "CFBundleName": "headroom", "CFBundleShortVersionString": version}, handle)
+        return made
+
+    def zipped(app_folder, name):
+        made = os.path.join(box, name)
+        subprocess.run(["/usr/bin/ditto", "-c", "-k", "--keepParent", app_folder, made], check=True)       # as package.sh packs it
+        return open(made, "rb").read()
+    version_of = lambda app_folder: cleaner.bundle_info(app_folder).get("CFBundleShortVersionString")
+    installed = bundle(shelf, cleaner.VERSION)
+    release = zipped(bundle(os.path.join(box, "release-9.9"), "9.9"), "good.zip")
+    requirement = 'identifier "local.headroom" and certificate leaf = H"0123456789abcdef0123456789abcdef01234567"'
+    signer = {"display": f"designated => {requirement}\n", "verify": 0, "arm": "1", "finder": (0, "")}
+    seen_new = []
+
+    def tools_say(command):
+        if command[0] == "/usr/bin/codesign":
+            if command[1:3] == ["-d", "-r-"]:
+                assert command[3:] == [installed], command
+                return 0, "host => identifier \"com.apple.sh\" and anchor apple\n" + signer["display"]
+            assert command[1:5] == ["--verify", "--deep", "--strict", "-R=" + requirement], command
+            assert re.fullmatch(re.escape(shelf) + r"/\.headroom-update-\w+/new/headroom\.app", command[5]), command
+            seen_new.append(version_of(command[5]))
+            return signer["verify"], ""
+        if command[0] in ("/usr/bin/ditto", "/bin/chmod"):
+            assert command[-1].startswith(shelf + os.sep), command      # only ever inside the scratch folder beside the app
+            done = real_run(command)
+            return done.returncode, done.stdout
+        if command[0] == "/usr/sbin/sysctl":
+            return 0, signer["arm"] + "\n"
+        return signer["finder"]     # Finder, asked to take the old app ((0, ""): the Recorder says it took it)
+    update_tools = {"answer": tools_say, "fakes": ["/usr/bin/codesign", "/usr/bin/ditto", "/bin/chmod", "/usr/sbin/sysctl"],
+                    "never": ("/bin/rm", "/bin/sh")}
+
+    class Reply:
+        def __init__(self, status, headers, body):
+            self.status, self.headers, self.body = status, headers, io.BytesIO(body)
+
+        def getheader(self, name):
+            return self.headers.get(name)
+
+        def read(self, amount=-1):
+            return self.body.read(amount)
+
+    class Net:
+        """Stands in for http.client.HTTPSConnection: an answer for each (host, path), and a note of every host asked."""
+        routes, asked = {}, []
+
+        def __init__(self, host, timeout=None, context=None):
+            assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname and timeout, "certificates checked the default way"
+            self.host = host
+
+        def request(self, method, path, headers=None):
+            assert method == "GET" and (self.host, path) in Net.routes, (self.host, path)
+            Net.asked.append((self.host, path))
+            self.answer = Net.routes[(self.host, path)]
+
+        def getresponse(self):
+            return Reply(*(self.answer() if callable(self.answer) else self.answer))     # a function: something happens meanwhile
+
+        def close(self):
+            pass
+    base = "/ips610/headroom/releases/download/v9.9/"
+    cdn = "release-assets.githubusercontent.com"
+
+    def published(archive, asset="headroom-apple-silicon.zip", sums=None, hop=f"https://{cdn}/blob?sig=abc", length=True):
+        """What GitHub would answer for release 9.9 with this zip in it."""
+        digest = cleaner.hashlib.sha256(archive).hexdigest()
+        sums = f"{digest}  {asset}\n{'0' * 64}  some-other-file.zip\n" if sums is None else sums
+        Net.routes = {("github.com", base + asset): (302, {"Location": hop}, b""),
+                      (cdn, "/blob?sig=abc"): (200, {"Content-Length": str(len(archive))} if length else {}, archive),
+                      ("github.com", base + "SHA256SUMS"): (200, {}, sums.encode())}
+        Net.asked = []
+    real_here, real_https, real_newest, real_restart, real_max = cleaner.HERE, cleaner.HTTPS, cleaner.newest_release, cleaner.restart_into, cleaner.UPDATE_MAX
+    restarted = []
+    cleaner.HERE, cleaner.HTTPS = os.path.join(installed, "Contents", "Resources"), Net
+    cleaner.newest_release, cleaner.restart_into = (lambda: "9.9"), restarted.append
+    assert cleaner.own_bundle() == installed
+
+    def press():
+        with recording(Recorder(**update_tools)) as recorder:
+            out = cleaner.update_now()
+        return out, recorder.calls
+
+    def let_go():
+        """After an update that went through, the server would stop. Here it carries on: its locks are handed back."""
+        assert cleaner.UPDATING.locked() and cleaner.job_lock(wait=False) is None, "both held until the server stops"
+        cleaner.HELD_FOR_EXIT.close()
+        cleaner.HELD_FOR_EXIT = None
+        cleaner.UPDATING.release()
+
+    def untouched(why):
+        """The installed app exactly as it was, nothing left beside it, nothing handed to Finder, nothing restarted."""
+        assert version_of(installed) == cleaner.VERSION and os.listdir(shelf) == ["headroom.app"], (why, os.listdir(shelf))
+        assert os.path.isfile(os.path.join(installed, "Contents", "MacOS", "headroom-app")) and restarted == [], why
+    try:
+        # Offered only where it can be done safely. From a plain folder: no. Signed ad hoc (the
+        # requirement names only that build's own hash): no. A folder this account can't rename in: no.
+        published(release)
+        with recording(Recorder(**update_tools)):
+            assert cleaner.update_offer() == (installed, requirement, "local.headroom") and cleaner.update_info(force=True)["can_update"] is True
+            assert cleaner.release_asset() == "headroom-apple-silicon.zip"
+            signer["arm"] = "0"
+            assert cleaner.release_asset() == "headroom-intel.zip", "by the hardware: an Intel build under Rosetta would get the native one"
+            signer["arm"] = "1"
+            for unsigned in ('# designated => cdhash H"702c482f413de9817a1e1d13830b75f970868578"\n', "", "designated => \n",
+                             'designated => identifier "local.headroom" and cdhash H"00"\n',
+                             # The word alone, in a name anybody may choose, pins nothing.
+                             '# designated => identifier "local.certificate-test"\n', 'designated => identifier "certificate leaf"\n',
+                             'designated => identifier "anchor apple"\n', 'designated => identifier "local.headroom"\n',
+                             "designated => identifier certificate.test\n", "designated => identifier anchored\n",
+                             'designated => identifier "x" and certificate leaf = H"00" and cdhash H"11"\n'):
+                signer["display"] = unsigned
+                assert cleaner.update_offer() is None and cleaner.update_info()["can_update"] is False, unsigned
+                assert cleaner.update_now()["text"].startswith("This copy of headroom can't update itself."), unsigned
+            for pinned in (requirement, 'identifier "local.headroom" and certificate root = H"0123"', 'identifier "com.apple.Safari" and anchor apple',
+                           'identifier "x" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and '
+                           'certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "ABCDE12345"'):
+                assert cleaner.pins_signer(pinned), pinned
+            signer["display"] = f"designated => {requirement}\n"
+            os.chmod(shelf, 0o555)
+            assert cleaner.update_offer() is None, "a folder this account can't rename things in"
+            os.chmod(shelf, 0o755)
+            cleaner.HERE = real_here
+            assert cleaner.own_bundle() is None and cleaner.update_offer() is None, "run from a plain folder"
+            cleaner.HERE = os.path.join(installed, "Contents", "Resources")
+            real_link = os.path.join(box, "linked.app")
+            os.symlink(installed, real_link)
+            cleaner.HERE = os.path.join(real_link, "Contents", "Resources")
+            assert cleaner.own_bundle() == installed, "found by where it really is"
+            cleaner.HERE = os.path.join(installed, "Contents", "Resources")
+        assert Net.asked == [], "none of that asked GitHub for anything"
+        untouched("not offered")
+        # A really signed scratch bundle, signed ad hoc once: codesign's own words say "cdhash", so it isn't offered.
+        ad_hoc = bundle(os.path.join(box, "ad-hoc"), cleaner.VERSION)
+        if subprocess.run(["/usr/bin/codesign", "-s", "-", ad_hoc], capture_output=True).returncode == 0:
+            assert re.fullmatch(r'cdhash H"[0-9a-f]{40}"', cleaner.designated(ad_hoc)), cleaner.designated(ad_hoc)
+            cleaner.HERE = os.path.join(ad_hoc, "Contents", "Resources")
+            assert cleaner.update_offer() is None
+            cleaner.HERE = os.path.join(installed, "Contents", "Resources")
+
+        # Every doubt stops it, with the installed app exactly as it was.
+        # 1. The download is sent on to http, or to a host that isn't GitHub's: stopped before that host hears of it.
+        for elsewhere in (f"http://{cdn}/blob?sig=abc", "https://evil.example/blob?sig=abc", "https://githubusercontent.com.evil.example/x",
+                          "https://evilgithubusercontent.com/x", "https://github.com.evil.example/x", "https://github.com@evil.example/x",
+                          f"https://{cdn}:8443/blob?sig=abc", "ftp://github.com/x", "//evil.example/x", "",
+                          "https://evil\u200b.githubusercontent.com/x", "https://a_b.githubusercontent.com/x", "https://evil%2e.githubusercontent.com/x"):
+            published(release, hop=elsewhere)
+            out, calls = press()
+            assert not out["ok"] and ("isn't GitHub over https" in out["text"] or "too many times" in out["text"]), (elsewhere, out)
+            assert {host for host, _ in Net.asked} == {"github.com"}, (elsewhere, Net.asked)
+            untouched(elsewhere)
+        # The network cuts the download off (a campus firewall does this to GitHub's download server): said in plain words.
+        real_fetch = cleaner.fetch
+
+        def cut_off(*_):
+            raise ConnectionResetError(54, "Connection reset by peer")
+        cleaner.fetch = cut_off
+        try:
+            out, calls = press()
+        finally:
+            cleaner.fetch = real_fetch
+        assert out == {"ok": False, "text": "The download did not arrive: Connection reset by peer. Some networks block GitHub's downloads; "
+                                            "if it keeps happening, try on another network. headroom is as it was."}, out
+        untouched("cut off")
+        # 2. Bigger than headroom could be, whether it says so or just keeps coming.
+        cleaner.UPDATE_MAX = len(release) - 1
+        for length in (True, False):
+            published(release, length=length)
+            out, calls = press()
+            assert out == {"ok": False, "text": "The download is far bigger than headroom is, so it was stopped."}, out
+            untouched("too big")
+        cleaner.UPDATE_MAX = real_max
+        # 3. The checksum published beside it doesn't match, or isn't there.
+        for sums in (f"{'1' * 64}  headroom-apple-silicon.zip\n", f"{cleaner.hashlib.sha256(release).hexdigest()}  headroom-intel.zip\n", "", "garbage"):
+            published(release, sums=sums)
+            out, calls = press()
+            assert out == {"ok": False, "text": "The download didn't arrive whole (its checksum is wrong). Try again."}, out
+            assert not [c for c in calls if c[0] == "/usr/bin/ditto"], "not even unpacked"
+            untouched("checksum")
+        # 4. The zip holds something other than one plain headroom.app.
+        outside_mark = os.path.join(box, "written-outside")
+
+        def crafted(entries):
+            made = io.BytesIO()
+            with zipfile.ZipFile(made, "w") as archive:
+                for name, content, kind in entries:
+                    entry = zipfile.ZipInfo(name)
+                    entry.external_attr = (kind | 0o755) << 16
+                    archive.writestr(entry, content)
+            return made.getvalue()
+        plist = open(os.path.join(box, "release-9.9", "headroom.app", "Contents", "Info.plist"), "rb").read()
+        good = [("headroom.app/", b"", 0o40000), ("headroom.app/Contents/", b"", 0o40000), ("headroom.app/Contents/Info.plist", plist, 0o100000)]
+        for what, entries, never_unpacked in (
+                ("a second thing beside it", good + [("README.txt", b"hello", 0o100000)], True),
+                ("a second app beside it", good + [("other.app/", b"", 0o40000)], True),
+                ("a path that climbs out", good + [("headroom.app/../../written-outside", b"x", 0o100000)], True),
+                ("a path from the root", good + [(outside_mark, b"x", 0o100000)], True),
+                ("another app altogether", [("Evil.app/", b"", 0o40000), ("Evil.app/Contents/Info.plist", plist, 0o100000)], True),
+                ("a link in the app's place", [("headroom.app", os.path.join(box, "release-9.9", "headroom.app").encode(), 0o120000)], False),
+                ("a file in the app's place", [("headroom.app", b"not a folder", 0o100000)], False),
+                ("nothing at all", [], False)):
+            published(crafted(entries))
+            out, calls = press()
+            assert not out["ok"] and ("something other than headroom.app" in out["text"] or "isn't a plain headroom.app" in out["text"]), (what, out)
+            assert (not [c for c in calls if c[0] == "/usr/bin/ditto"]) is never_unpacked, what
+            assert not [c for c in calls if c[0] == "/usr/bin/codesign" and "--verify" in c], (what, "never got as far as the signature")
+            assert not os.path.exists(outside_mark), what
+            untouched(what)
+        published(b"this is not a zip")
+        out, calls = press()
+        assert not out["ok"] and out["text"].startswith("The update did not finish:") and out["text"].endswith("headroom is as it was."), out
+        untouched("not a zip")
+        too_new = bytearray(crafted(good))
+        at = too_new.index(b"PK\x01\x02")
+        too_new[at + 6:at + 8] = (99).to_bytes(2, "little")             # "needs version 9.9 to unpack": Python raises NotImplementedError
+        published(bytes(too_new))
+        out, calls = press()
+        assert out == {"ok": False, "text": "The update did not finish: zip file version 9.9. headroom is as it was."}, out
+        untouched("a zip from the future")
+        # 5. THE check: the signature doesn't meet the running app's own requirement.
+        published(release)
+        signer["verify"] = 3
+        out, calls = press()
+        assert out == {"ok": False, "text": "The download isn't signed the way this headroom is, so it was not installed."}, out
+        assert seen_new[-1] == "9.9" and len([c for c in calls if "--verify" in c]) == 1
+        untouched("signature")
+        signer["verify"] = 0
+        #    ...or it is signed right and is another app, or not the version that is out, or no newer than this one.
+        for what, made, said in (("another app", bundle(os.path.join(box, "release-other"), "9.9", ident="local.other"), "The download isn't headroom, so it was not installed."),
+                                 ("an older version in a newer release's place", bundle(os.path.join(box, "release-old"), "0.1"), "The download isn't version 9.9, so it was not installed."),
+                                 ("the same version again", bundle(os.path.join(box, "release-same"), cleaner.VERSION), "The download isn't version 9.9, so it was not installed.")):
+            published(zipped(made, "odd.zip"))
+            out, calls = press()
+            assert out == {"ok": False, "text": said}, (what, out)
+            untouched(what)
+        with recording(Recorder(**update_tools)):
+            for version, latest, said in ((cleaner.VERSION, cleaner.VERSION, "no newer than the headroom you have"), ("0.1", "0.1", "no newer than the headroom you have"),
+                                          ("9.9", "9.10", "isn't version 9.10"), ("９.９", "９.９", "isn't version"), ("9.9 ", "9.9 ", "isn't version")):
+                odd = bundle(os.path.join(shelf, ".headroom-update-test", "new"), version)
+                try:
+                    cleaner.check_release(odd, requirement, "local.headroom", latest)
+                    raise AssertionError(("taken", version, latest))
+                except cleaner.Refused as why:
+                    assert said in str(why), (version, latest, str(why))
+        subprocess.run(["/bin/rm", "-rf", "--", os.path.join(shelf, ".headroom-update-test")], check=True)
+        cleaner.newest_release = lambda: cleaner.VERSION
+        Net.asked = []
+        out, calls = press()
+        assert out == {"ok": False, "text": "You have the newest version."} and Net.asked == [], "nothing newer: nothing is fetched"
+        cleaner.newest_release = lambda: "9.9"
+        # 6. The swap: the new app can't take the old one's place, and the old one is put back.
+        published(release)
+        moves = []
+
+        def one_rename(source, target):
+            moves.append((source, target))
+            if len(moves) == 2:
+                raise PermissionError(1, "Operation not permitted")
+            os.rename(source, target)
+        cleaner.move = one_rename
+        out, calls = press()
+        cleaner.move = os.rename
+        assert out == {"ok": False, "text": "The new version could not be put in place: Operation not permitted. headroom is as it was."}, out
+        assert len(moves) == 3 and moves[2] == (moves[0][1], installed), "the first rename undone"
+        assert not [c for c in calls if c[0] == "/usr/bin/osascript"], "nothing went to the Trash"
+        untouched("rollback")
+        # Not while a delete is running, and never two at once.
+        cleaner.JOB["running"] = True
+        assert press()[0] == {"ok": False, "text": "A delete is running. Update when it is done."}
+        cleaner.JOB["running"] = False
+        cleaner.UPDATING.acquire()
+        assert press()[0] == {"ok": False, "text": "An update is already under way."}
+        cleaner.UPDATING.release()
+        untouched("busy")
+
+        # 6. A delete that started while the download ran, here or in headroom's other program: no swap.
+        published(release)
+        Net.routes[(cdn, "/blob?sig=abc")] = lambda: (cleaner.JOB.update(running=True), (200, {}, release))[1]
+        out, calls = press()
+        cleaner.JOB["running"] = False
+        assert out == {"ok": False, "text": "A delete started meanwhile. Update when it is done. headroom is as it was."}, out
+        assert [c for c in calls if "--verify" in c], "it had got as far as the signature"
+        untouched("a delete started in this server")
+        published(release)
+        theirs = cleaner.job_lock(wait=False)
+        out, calls = press()
+        theirs.close()
+        assert out["text"].startswith("A delete started meanwhile.") and not cleaner.UPDATING.locked() and cleaner.job_lock(wait=False) is not None
+        untouched("a delete was running in the other program")
+
+        # 1. What a zip carries beside the files: modes anyone may write through, an access list, setuid.
+        #    The signature says nothing about those, so they are put right before it is checked.
+        loose = bundle(os.path.join(box, "release-loose"), "9.9")
+        for folder in (loose, os.path.join(loose, "Contents"), os.path.join(loose, "Contents", "MacOS")):
+            os.chmod(folder, 0o777)
+        os.chmod(os.path.join(loose, "Contents", "Resources", "cleaner.py"), 0o666)
+        os.chmod(os.path.join(loose, "Contents", "MacOS", "headroom-app"), 0o6755)
+        subprocess.run(["/bin/chmod", "+a", "everyone allow add_file,delete,add_subdirectory,delete_child,file_inherit,directory_inherit",
+                        os.path.join(loose, "Contents")], check=True)
+        loose_zip = zipped(loose, "loose.zip")
+
+        def doors(app_folder):
+            """Every path in an app that someone other than its owner could change, or that runs as someone else."""
+            found = []
+            for folder, _, names in os.walk(app_folder):
+                for path in [folder] + [os.path.join(folder, name) for name in names]:
+                    mode = os.lstat(path).st_mode
+                    listed = subprocess.run(["/bin/ls", "-lde", path], capture_output=True, text=True).stdout
+                    if mode & 0o6022 or re.search(r"^ \d+: ", listed, re.M):
+                        found.append(os.path.relpath(path, app_folder))
+            return sorted(found)
+        as_packed = os.path.join(box, "loose-unpacked")
+        subprocess.run(["/usr/bin/ditto", "-x", "-k", os.path.join(box, "loose.zip"), as_packed], check=True)
+        assert {".", "Contents", "Contents/MacOS"} <= set(doors(os.path.join(as_packed, "headroom.app"))), "the zip does carry them"
+        published(loose_zip)
+        checked_as = []
+        real_says = update_tools["answer"]
+
+        def looks_first(command):
+            if command[0] == "/usr/bin/codesign" and "--verify" in command:
+                checked_as.append(doors(command[-1]))        # what the signature check gets to see
+            return real_says(command)
+        with recording(Recorder(**{**update_tools, "answer": looks_first})) as recorder:
+            out = cleaner.update_now()
+        assert out["ok"] and checked_as == [[]] and doors(installed) == [], (out, checked_as, doors(installed))
+        assert [c[:2] for c in recorder.calls if c[0] == "/bin/chmod"] == [["/bin/chmod", "-RN"]]
+        let_go()
+        restarted.clear()
+        subprocess.run(["/bin/rm", "-rf", "--", *[os.path.join(shelf, name) for name in os.listdir(shelf)]], check=True)
+        installed = bundle(shelf, cleaner.VERSION)
+        # A link is not followed while that is done, and its own mode is not the point.
+        outside_file = put("outside-the-app", kb=1, root=box)
+        os.chmod(outside_file, 0o666)
+        linked_in = bundle(os.path.join(shelf, ".headroom-update-test", "new"), "9.9")
+        os.symlink(outside_file, os.path.join(linked_in, "Contents", "Resources", "link"))
+        os.symlink(os.path.dirname(outside_file), os.path.join(linked_in, "Contents", "folder-link"))
+        os.chmod(os.path.join(linked_in, "Contents", "Resources"), 0o777)
+        os.chmod(os.path.join(linked_in, "Contents", "MacOS", "headroom-app"), 0o6777)        # setuid, setgid, and anyone may write
+        assert doors(linked_in) == ["Contents/MacOS/headroom-app", "Contents/Resources"]
+        with recording(Recorder(**update_tools)):
+            cleaner.plain_modes(linked_in)
+        assert os.stat(outside_file).st_mode & 0o777 == 0o666 and doors(linked_in) == [], "what a link points at is left alone"
+        assert os.stat(os.path.join(linked_in, "Contents", "MacOS", "headroom-app")).st_mode & 0o7777 == 0o755
+        subprocess.run(["/bin/rm", "-rf", "--", os.path.join(shelf, ".headroom-update-test")], check=True)
+
+        # 2. A zip that says it unpacks to ten bytes and unpacks to megabytes. What it says is not
+        #    what protects: the folder is measured while ditto writes, and ditto is stopped.
+        real_unpacked_max, cleaner.UNPACKED_MAX = cleaner.UNPACKED_MAX, 1000 * 1000
+        swollen = io.BytesIO()
+        with zipfile.ZipFile(swollen, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("headroom.app/", b"")
+            archive.writestr("headroom.app/big", b"\0" * (40 * 1000 * 1000))
+        lying = bytearray(swollen.getvalue())
+        for marker, size_at in ((b"PK\x03\x04", 22), (b"PK\x01\x02", 24)):      # each entry's own header, and the index at the end
+            start = 0
+            while True:
+                at = lying.find(marker, start)
+                if at < 0:
+                    break
+                name_at = at + (30 if marker == b"PK\x03\x04" else 46)
+                if lying[name_at:name_at + 16] == b"headroom.app/big":
+                    lying[at + size_at:at + size_at + 4] = (10).to_bytes(4, "little")
+                start = at + 4
+        lying_zip = os.path.join(box, "lying.zip")
+        with open(lying_zip, "wb") as handle:
+            handle.write(lying)
+        with zipfile.ZipFile(lying_zip) as archive:
+            assert sum(entry.file_size for entry in archive.infolist()) == 10 and os.path.getsize(lying_zip) < 100 * 1000, "it says ten bytes"
+        swollen_into = os.path.join(box, "swollen")
+        try:
+            cleaner.unpack_release(lying_zip, swollen_into)          # the real ditto, watched through the real run()
+            raise AssertionError("unpacked")
+        except cleaner.Refused as why:
+            assert str(why) == "The download unpacks to far more than headroom is, so it was stopped.", str(why)
+        with open(lying_zip, "wb") as handle:
+            handle.write(swollen.getvalue())                         # and one that says so itself is refused before ditto starts
+        try:
+            cleaner.unpack_release(lying_zip, os.path.join(box, "swollen-2"))
+            raise AssertionError("unpacked")
+        except cleaner.Refused as why:
+            assert str(why) == "The download unpacks to far more than headroom is, so it was not unpacked." and not os.path.exists(os.path.join(box, "swollen-2"))
+        cleaner.UNPACKED_MAX = real_unpacked_max
+        # The watching itself: a program is stopped the moment its watcher says so, or when its time is up.
+        began = time.monotonic()
+        assert cleaner.run(["/bin/sleep", "20"], watch=lambda: True).returncode == -9
+        assert cleaner.run(["/bin/sleep", "20"], timeout=0.5, watch=lambda: False).returncode == -9 and time.monotonic() - began < 10
+        watched = cleaner.run(["/bin/echo", "done"], watch=lambda: False)
+        assert (watched.returncode, watched.stdout) == (0, "done\n")
+
+        # All of it holds: the new app is in place, the old one is in the Trash under its own name
+        # (renamed there: not deleted, and not through Finder, which holds the request for two
+        # minutes and refuses while the old app is still running), nothing is left beside the app,
+        # and the server hands over. A second time, the name in the Trash is taken: the next one.
+        trash_folder = os.path.join(cleaner.HOME, ".Trash")
+        for left in os.listdir(trash_folder) if os.path.isdir(trash_folder) else ():       # earlier updates in this test left old apps there
+            if left.startswith("headroom "):
+                subprocess.run(["/bin/rm", "-rf", "--", os.path.join(trash_folder, left)], check=True)
+        for expected_name in (f"headroom {cleaner.VERSION}.app", f"headroom {cleaner.VERSION} 2.app"):
+            subprocess.run(["/bin/rm", "-rf", "--", *[os.path.join(shelf, name) for name in os.listdir(shelf)]], check=True)
+            installed = bundle(shelf, cleaner.VERSION)
+            restarted.clear()
+            published(release)
+            lines_before = len(cleaner.history(10 ** 6))
+            out, calls = press()
+            assert out == {"ok": True, "version": "9.9", "trashed": True, "text": f"The version you had is in the Trash, as {expected_name}."}, out
+            assert version_of(installed) == "9.9" and restarted == [installed]
+            assert Net.asked == [("github.com", base + "headroom-apple-silicon.zip"), (cdn, "/blob?sig=abc"), ("github.com", base + "SHA256SUMS")]
+            assert version_of(os.path.join(trash_folder, expected_name)) == cleaner.VERSION, "the old app, whole, in the Trash"
+            assert os.listdir(shelf) == ["headroom.app"], "nothing is left beside the app"
+            assert not [c for c in calls if c[0] == "/usr/bin/osascript"], "Finder is not asked: the old app is still running"
+            assert all(c[0].startswith("/") and c[0] not in ("/bin/sh", "/bin/bash", "/bin/zsh") for c in calls), "argument lists, never a shell"
+            said = cleaner.history()[0]
+            assert len(cleaner.history(10 ** 6)) == lines_before + 1 and (said["what"], said["section"], said["result"], said["paths"]) == (
+                f"headroom {cleaner.VERSION}, the version before 9.9", "update", "trashed", [f"~/.Trash/{expected_name}"]) and "error" not in said, said
+            # From the swap until the server stops, nothing else starts: the update lock and the job lock stay held.
+            assert press()[0] == {"ok": False, "text": "An update is already under way."}
+            let_go()
+
+        # 7. The Trash can't be written to: the old app stays where it is, in the scratch folder
+        #    only this account can open, and the words say exactly where. Never deleted.
+        subprocess.run(["/bin/rm", "-rf", "--", *[os.path.join(shelf, name) for name in os.listdir(shelf)]], check=True)
+        installed = bundle(shelf, cleaner.VERSION)
+        restarted.clear()
+        published(release)
+        os.chmod(trash_folder, 0o555)
+        out, calls = press()
+        os.chmod(trash_folder, 0o755)
+        let_go()
+        (scratch,) = [name for name in os.listdir(shelf) if name != "headroom.app"]
+        old = os.path.join(shelf, scratch, "previous", "headroom.app")
+        assert re.fullmatch(r"\.headroom-update-\w+", scratch) and os.stat(os.path.join(shelf, scratch)).st_mode & 0o777 == 0o700
+        assert out == {"ok": True, "version": "9.9", "trashed": False, "text": (
+            f"The version you had could not be moved to the Trash. It is at {old}, and you can delete it yourself. Permission denied.")}, out
+        assert version_of(old) == cleaner.VERSION and version_of(installed) == "9.9", "left where it is: never deleted"
+        assert os.listdir(os.path.join(shelf, scratch)) == ["previous"], "and nothing else is left in there"
+        assert not [c for c in calls if c[0] == "/usr/bin/osascript"]
+        said = cleaner.history()[0]
+        assert (said["result"], said["paths"], said["error"]) == ("failed", [cleaner.tilde(old)], out["text"]), said
+        subprocess.run(["/bin/rm", "-rf", "--", os.path.join(trash_folder, f"headroom {cleaner.VERSION}.app"),
+                        os.path.join(trash_folder, f"headroom {cleaner.VERSION} 2.app")], check=True)
+        # An app counts as installed only when it sits in an Applications folder itself. The copy an
+        # update set aside lies in a folder beside the app: opened from there, it must not point the
+        # reminder's agent at itself.
+        real_launcher = cleaner.launcher_program
+        cleaner.launcher_program = real_launcher_program
+        for where, counts in ((os.path.join(cleaner.APPLICATIONS, "headroom.app"), True),
+                              (os.path.join(cleaner.HOME, "Applications", "headroom.app"), True),
+                              (os.path.join(cleaner.APPLICATIONS, ".headroom-update-abc", "previous", "headroom.app"), False),
+                              (os.path.join(cleaner.APPLICATIONS, "Utilities", "headroom.app"), False),
+                              (os.path.join(cleaner.HOME, "Downloads", "headroom.app"), False)):
+            program = put("Contents", "MacOS", "headroom-app", kb=1, root=where)
+            os.chmod(program, 0o755)
+            cleaner.HERE = os.path.dirname(put("Contents", "Resources", "cleaner.py", kb=1, root=where))
+            assert (cleaner.launcher_program() == program) is counts, where
+            subprocess.run(["/bin/rm", "-rf", "--", where], check=True)
+        cleaner.HERE, cleaner.launcher_program = os.path.join(installed, "Contents", "Resources"), real_launcher
+        # The download itself: only https, only GitHub's names, never more than it may.
+        Net.routes = {("github.com", "/a"): (302, {"Location": "/b"}, b""), ("github.com", "/b"): (200, {}, b"hello")}
+        assert cleaner.fetch("https://github.com/a", 10) == b"hello", "a redirect on the same host is followed"
+        for bad in ("http://github.com/a", "https://example.com/a", "https://github.com:444/a", "https://user:pw@github.com/a", "file:///etc/hosts"):
+            try:
+                cleaner.fetch(bad, 10)
+                raise AssertionError(bad)
+            except cleaner.Refused:
+                pass
+        Net.routes = {("github.com", "/loop"): (302, {"Location": "/loop"}, b""), ("github.com", "/gone"): (404, {}, b"")}
+        for stuck, said in (("https://github.com/loop", "too many times"), ("https://github.com/gone", "GitHub answered 404")):
+            try:
+                cleaner.fetch(stuck, 10)
+                raise AssertionError(stuck)
+            except cleaner.Refused as why:
+                assert said in str(why), str(why)
+    finally:
+        cleaner.HERE, cleaner.HTTPS, cleaner.newest_release, cleaner.restart_into, cleaner.UPDATE_MAX = real_here, real_https, real_newest, real_restart, real_max
+        cleaner.move = os.rename
+        subprocess.run(["/bin/chmod", "-R", "u+rwx", shelf])
+
     # The Finder script once called its variable `target`, a word of Finder's own: inside the tell,
     # Finder looked up its own "target" and every move failed (-1728). The stand-in Finder here
     # can't show that, so the word itself is checked. Verified against the real Finder by hand.
