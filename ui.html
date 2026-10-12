@@ -356,6 +356,12 @@
   .row-size { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; padding-top: 2px; font: 12.5px/1.4 var(--f-mono); white-space: nowrap; font-variant-numeric: tabular-nums; }
   /* "Never offer" sits under the size, outside the label so it never ticks the box. */
   .row-keep { position: absolute; right: 12px; top: 38px; }
+  /* Under a row: "Show in Finder", and on a bundle the button that opens it. */
+  .row-more { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 18px; padding: 0 12px 10px 34px; margin-top: -8px; }
+  .row-more .more { display: inline; margin: 0; padding: 6px 0; }
+  /* A bundle's own rows, a step in from the line that holds them. */
+  .bundle-body { margin-left: 34px; border-top: 1px solid var(--line); }
+  .bundle-body .rows { border-top: 0; }
   @media (hover: hover) {
     .row-keep { opacity: 0; transition: opacity .2s; }
     .row:hover .row-keep, .row:focus-within .row-keep { opacity: 1; }
@@ -538,6 +544,8 @@
     .notes { padding-left: 30px; }
     .sec-inner { padding-left: 0; }
     .more { margin-left: 34px; }
+    .bundle-body { margin-left: 16px; }
+    .row-more { padding-left: 30px; }
     .quiet { padding-left: 34px; }
     .row label { column-gap: 12px; }
     .r-cols { grid-template-columns: minmax(0, 1fr); }
@@ -846,6 +854,10 @@ const S = {
   jobTrash: false,        // the same, for the delete that is running
   queueTrash: false,      // a question about queued picks promised the Trash: the next job keeps that
   growth: null,           // {span, sections, top}: what grew since about a week ago
+  bundles: {},            // key -> {noun, detail, note, min}: rows that belong together, folded into one line
+  bundleOpen: {},         // key -> its rows are showing
+  bundleShown: {},        // key -> how many of its rows are showing, when that is more than the first few
+  bundleSaid: {},         // key -> what went wrong showing it in Finder
   gone: false,
 };
 const shells = {};
@@ -918,6 +930,39 @@ const allRows = () => [...S.rows.values()];
 const weight = row => row.kb || row.weighs || 0;
 const bySize = (a, b) => (b.rank || 0) - (a.rank || 0) || weight(b) - weight(a) || String(a.name).localeCompare(String(b.name));
 const rowsIn = group => allRows().filter(row => row.group === group).sort(bySize);
+const YOURS = new Set(['models', 'archives', 'shots']);     // your own files: each row can be shown in Finder
+const PAGE = 200;         // rows a bundle adds at a time once it is open
+
+// The bundles the page folds into one line each: key -> its rows. Rows that belong together but
+// are few (a file name in two folders) are simply shown one by one.
+function folded(rows = allRows()) {
+  const by = new Map();
+  for (const row of rows) {
+    if (!row.bundle) continue;
+    if (!by.has(row.bundle)) by.set(row.bundle, []);
+    by.get(row.bundle).push(row);
+  }
+  for (const [key, members] of by) if (!S.bundles[key] || members.length <= S.bundles[key].min) by.delete(key);
+  return by;
+}
+
+// What a section lists, in order: single rows, and each folded bundle as one entry.
+function entriesIn(group) {
+  const rows = rowsIn(group);
+  const folds = folded(rows);
+  const seen = new Set();
+  const entries = [];
+  for (const row of rows) {
+    const members = folds.get(row.bundle);
+    if (!members) entries.push({ row, kb: weight(row), rank: row.rank || 0 });
+    else if (!seen.has(row.bundle)) {
+      seen.add(row.bundle);
+      entries.push({ key: row.bundle, meta: S.bundles[row.bundle], rows: members, kb: sumKb(members), rank: Math.max(...members.map(member => member.rank || 0)) });
+    }
+  }
+  return entries.sort((a, b) => b.rank - a.rank || b.kb - a.kb);
+}
+const named = (count, meta) => `${count} ${meta.noun}`;
 // Rows that can be picked now: confirmed by this launch's scan, not blocked, not part of a delete.
 const free = row => !row.stale && !row.blocked && !row.status;
 const chosenRows = () => allRows().filter(row => row.checked && free(row)).sort(bySize);
@@ -1240,16 +1285,35 @@ function tickGroup(group, on) {
 
 const STATUS_TEXT = { queued: 'Waiting', next: 'Queued next', failed: 'Not deleted' };
 
-function rowNode(row) {
+// "Show in Finder" for a row of your own files, or (whole) for the folder a bundle's rows share.
+// The page sends the row's id; headroom knows the path and looks at it again before showing it.
+async function showInFinder(row, whole) {
+  let said = '';
+  try {
+    await api('/api/reveal', whole ? { id: row.id, bundle: true } : { id: row.id });
+  } catch (error) {
+    if (error instanceof TypeError) return error instanceof AppClosed ? null : showGone();
+    said = error.message;
+  }
+  if (whole) S.bundleSaid[row.bundle] = said;
+  else if (said) Object.assign(row, { note: said, noteKind: 'warn' });
+  if (said) announce(said);
+  if (said || whole) render();
+}
+
+// `inside`: the row is one of an opened bundle's, where its path from the shared folder names it
+// and the bundle's own line has already said what is true of them all.
+function rowNode(row, inside) {
   const box = el('input', {
     type: 'checkbox', key: 'row:' + row.id, checked: Boolean(row.checked),
     disabled: !free(row),
     onchange: event => { row.checked = event.target.checked; S.justFreed = null; render(); },
   });
   const text = el('span', { class: 'row-text' },
-    el('span', { class: 'row-name', text: row.name }),
-    row.detail && el('span', { class: 'row-detail', text: row.detail }));
-  const why = row.blocked || row.note;
+    el('span', { class: 'row-name', text: inside === true && row.inside ? row.inside : row.name }),
+    // Inside a bundle the folder is in the name already: only the date is left to say.
+    row.detail && el('span', { class: 'row-detail', text: inside === true ? row.detail.split(' · ').pop() : row.detail }));
+  const why = row.blocked || (inside === true && row.noteKind === 'info' ? '' : row.note);
   if (why && !row.stale) {
     // A row that only waits for the Move to Trash switch is not a warning: it says so quietly.
     const waits = /while Move to Trash is on/.test(row.blocked);
@@ -1269,10 +1333,79 @@ function rowNode(row) {
   if (keepable) classes.push('keepable');
   if (row.status) classes.push('is-' + row.status);
   return el('li', { class: classes.join(' ') }, el('label', {}, box, text, slot),
+    YOURS.has(row.group) && !row.stale && el('div', { class: 'row-more' }, el('button', {
+      type: 'button', class: 'link', key: 'reveal:' + row.id, text: 'Show in Finder',
+      'aria-label': `Show ${row.name} in Finder`, onclick: () => showInFinder(row),
+    })),
     keepable && el('button', {
       type: 'button', class: 'link row-keep', key: 'keep:' + row.id, text: 'Never offer',
       'aria-label': `Never offer ${row.name} again`, onclick: () => keep(row),
     }));
+}
+
+// A bundle: rows that belong together, as one line with one box. The line opens to the rows
+// themselves, largest first, each with its own box.
+const bundleIds = new Map();
+function bundleNode({ key, meta, rows }) {
+  if (!bundleIds.has(key)) bundleIds.set(key, 'bundle-' + bundleIds.size);
+  const usable = rows.filter(free);
+  const ticked = usable.filter(row => row.checked);
+  const open = Boolean(S.bundleOpen[key]);
+  const box = el('input', {
+    type: 'checkbox', key: 'bundle-box:' + key, checked: usable.length > 0 && ticked.length === usable.length,
+    disabled: !usable.length,
+    onchange: event => { for (const row of usable) row.checked = event.target.checked; S.justFreed = null; render(); },
+  });
+  // Some of them ticked and not all: the box says so, to the eye and to a screen reader.
+  box.indeterminate = ticked.length > 0 && ticked.length < usable.length;
+  if (box.indeterminate) box.setAttribute('aria-checked', 'mixed');
+  const text = el('span', { class: 'row-text' },
+    el('span', { class: 'row-name', text: named(rows.length, meta) }),
+    meta.detail && el('span', { class: 'row-detail', text: meta.detail }),
+    ticked.length > 0 && ticked.length < rows.length && el('span', { class: 'row-detail', text: `${ticked.length} of ${rows.length} picked · ${size(sumKb(ticked))}` }));
+  const note = (kind, words) => text.append(el('span', { class: 'row-note ' + kind }, icon(kind === 'info' ? 'info' : 'warn'), el('span', { text: words })));
+  const stale = rows.every(row => row.stale);
+  // What is true of them all, and how many of them ticking the whole section leaves out.
+  const leftOut = rows.filter(row => row.recent).length;
+  const words = [];
+  if (leftOut && !(leftOut === rows.length && /leaves them out/.test(meta.note))) {
+    words.push(`${leftOut === rows.length ? 'All of them are' : leftOut === 1 ? '1 of them is' : leftOut + ' of them are'} left out when you tick the whole section: added or changed in the last 30 days, or inside a git project.`);
+  }
+  if (meta.note) words.push(meta.note);
+  if (words.length && !stale) note('info', words.join(' '));
+  const failed = rows.filter(row => row.note && row.noteKind === 'bad');
+  if (failed.length) note('bad', `${failed.length === 1 ? '1 stayed' : failed.length + ' stayed'}: ${failed[0].note}`);
+  if (S.bundleSaid[key]) note('warn', S.bundleSaid[key]);
+  const slot = el('span', { class: 'row-size' });
+  const busy = rows.find(row => row.status === 'deleting');
+  if (busy) slot.append(spinner(), doing(busy));
+  else if (rows.some(row => row.status === 'queued' || row.status === 'next')) slot.append(STATUS_TEXT.queued);
+  else slot.append(size(sumKb(rows)));
+  const id = bundleIds.get(key);
+  const parts = [el('label', {}, box, text, slot),
+    el('div', { class: 'row-more' },
+      el('button', {
+        type: 'button', class: 'more', key: 'bundle:' + key, 'aria-expanded': String(open), 'aria-controls': id,
+        text: open ? 'Hide them' : `Show the ${rows.length} files`,
+        onclick: () => { S.bundleOpen[key] = !open; render(); },
+      }),
+      !stale && el('button', { type: 'button', class: 'link', key: 'bundle-reveal:' + key, text: 'Show in Finder',
+        'aria-label': `Show the folder of ${named(rows.length, meta)} in Finder`, onclick: () => showInFinder(rows[0], true) }))];
+  // The place the button opens is always there for it to point at, empty while it is closed.
+  const shown = Math.max(SHOWN, S.bundleShown[key] || 0);
+  const rest = open ? rows.slice(shown) : [];
+  parts.push(el('div', { class: 'bundle-body', id, hidden: !open },
+    open && el('ul', { class: 'rows' }, ...rows.slice(0, shown).map(row => rowNode(row, true))),
+    rest.length > 0 && el('button', {
+      type: 'button', class: 'more', key: 'bundle-more:' + key,
+      text: rest.length > PAGE ? `Show ${PAGE} more · ${rest.length} left` : `Show ${rest.length} more · ${size(sumKb(rest))}`,
+      onclick: () => { S.bundleShown[key] = shown + PAGE; render(); },
+    })));
+  const classes = ['row', 'bundle'];
+  if (!usable.length && !stale) classes.push('off');
+  if (stale) classes.push('stale');
+  if (busy) classes.push('is-deleting');
+  return el('li', { class: classes.join(' ') }, ...parts);
 }
 
 function updateGroup(group) {
@@ -1309,12 +1442,14 @@ function updateGroup(group) {
   shell.notes.replaceChildren(...(S.notes[group.id] || []).map(note =>
     el('p', { class: 'note ' + note.kind }, icon(note.kind === 'error' ? 'warn' : 'info'), el('span', { text: note.text }))));
 
-  const visible = S.showAll[group.id] ? mine : mine.slice(0, SHOWN);
-  const hidden = mine.slice(visible.length);
-  shell.list.replaceChildren(...visible.map(rowNode));
+  // The list is of entries: a row, or a bundle of rows folded into one line.
+  const entries = entriesIn(group.id);
+  const visible = S.showAll[group.id] ? entries : entries.slice(0, SHOWN);
+  const hidden = entries.slice(visible.length);
+  shell.list.replaceChildren(...visible.map(entry => entry.row ? rowNode(entry.row) : bundleNode(entry)));
   shell.list.hidden = !visible.length;
   shell.more.hidden = !hidden.length;
-  shell.more.textContent = hidden.length ? `Show ${hidden.length} more · ${size(sumKb(hidden))}` : '';
+  shell.more.textContent = hidden.length ? `Show ${hidden.length} more · ${size(hidden.reduce((total, entry) => total + entry.kb, 0))}` : '';
   shell.quiet.hidden = !(measuring || !mine.length);
   const late = scanningNow() ? [] : slowPending(group.id);
   shell.quiet.replaceChildren(...(measuring
@@ -1450,6 +1585,8 @@ async function scan(start) {
   S.rows.clear();
   S.notes = {};
   S.showAll = {};
+  S.bundles = {};
+  S.bundleSaid = {};
   S.pending.clear();
   if (!start) S.sources = [];
   S.starting = true;
@@ -1471,6 +1608,7 @@ async function scan(start) {
     const saved = (start.last || {})[source.id];
     if (!saved || !Array.isArray(saved.items)) continue;
     S.lastAt = Math.max(S.lastAt, saved.at || 0);
+    Object.assign(S.bundles, saved.bundles || {});
     for (const item of saved.items) {
       if (item && KNOWN.has(item.group)) S.rows.set(item.id, { ...item, source: source.id, stale: true, blocked: '', checked: false, status: '', note: '', noteKind: '' });
     }
@@ -1535,6 +1673,7 @@ async function scanSource(source, gen) {
     }
     if (gen !== S.gen) return;
     dropStale();
+    Object.assign(S.bundles, found.bundles || {});
     for (const item of found.items || []) {
       if (!KNOWN.has(item.group)) continue;
       S.rows.set(item.id, { ...item, source: source.id, stale: false, blocked: item.blocked || '', checked: false, status: '', note: item.note || '', noteKind: 'info' });
@@ -1613,8 +1752,22 @@ function askDelete(safe) {
   if (!chosen.length || S.stopping) return;
   const n = chosen.length;
   const ids = chosen.map(row => row.id);
-  // The right column says where each one goes: straight off, to the Trash, or git gc.
-  const lines = chosen.map(row => [row.name, row.kb, row.action || (moves(row) ? 'Trash · ' + size(row.kb) : '')]);
+  // The right column says where each one goes: straight off, to the Trash, or git gc. A bundle
+  // is one line however many of its rows are picked: "37 of 118 files named …".
+  const folds = folded();
+  const lines = [];
+  const told = new Set();
+  for (const row of chosen) {
+    const members = folds.get(row.bundle);
+    if (!members) lines.push([row.name, row.kb, row.action || (moves(row) ? 'Trash · ' + size(row.kb) : '')]);
+    else if (!told.has(row.bundle)) {
+      told.add(row.bundle);
+      const picked = chosen.filter(one => one.bundle === row.bundle);
+      const kb = sumKb(picked);
+      lines.push([(picked.length < members.length ? picked.length + ' of ' : '') + named(members.length, S.bundles[row.bundle]), kb,
+        moves(row) ? 'Trash · ' + size(kb) : '']);
+    }
+  }
   const amount = size(sumKb(chosen));
   // The server is told what this question promised, so a switch turned off afterwards can't
   // delete for good what was confirmed for the Trash.
@@ -1696,12 +1849,19 @@ async function startDelete(ids, trash) {
 }
 
 function markQueued(ids) {
+  const picked = new Set(ids);
+  const groups = new Set();
   for (const id of ids) {
     const row = S.rows.get(id);
     if (!row) continue;
     Object.assign(row, { status: 'queued', note: '', noteKind: '' });
     S.open[row.group] = true;
-    if (rowsIn(row.group).indexOf(row) >= SHOWN) S.showAll[row.group] = true;
+    groups.add(row.group);
+  }
+  // Show what is being cleared, also when it sits past the first few lines of its section.
+  for (const group of groups) {
+    if (entriesIn(group).some((entry, index) => index >= SHOWN
+      && (entry.row ? picked.has(entry.row.id) : entry.rows.some(row => picked.has(row.id))))) S.showAll[group] = true;
   }
 }
 
@@ -1866,8 +2026,17 @@ async function startQueued() {
 
 function wrapUp(trouble) {
   const { results, count } = S.batch;
-  let freed = 0, moved = 0, movedCount = 0;
+  let freed = 0, moved = 0, movedCount = 0, undone = 0;
   const problems = [], said = [];
+  const folds = folded();
+  const together = new Map();       // a folded bundle -> [how many of its rows had trouble, the first reason]
+  const trouble_with = (row, name, why) => {
+    undone++;
+    const key = row && folds.has(row.bundle) ? row.bundle : '';
+    if (!key) problems.push([name, why]);
+    else if (together.has(key)) together.get(key)[0]++;
+    else together.set(key, [1, why]);
+  };
   for (const result of results) {
     if (result.trashed) { moved += result.freed_kb || 0; movedCount += result.freed_kb ? 1 : 0; }
     else freed += result.freed_kb || 0;
@@ -1877,12 +2046,14 @@ function wrapUp(trouble) {
     if (result.left_kb >= 1024) {
       const note = errors[0] || 'Some of this is in use and was kept.';
       if (row) Object.assign(row, { kb: result.left_kb, checked: false, status: '', note, noteKind: errors.length ? 'bad' : 'info' });
-      problems.push([result.name, errors.length ? errors[0] : `Some of this is in use and was kept (${size(result.left_kb)}).`]);
+      trouble_with(row, result.name, errors.length ? errors[0] : `Some of this is in use and was kept (${size(result.left_kb)}).`);
     } else {
+      if (errors.length) trouble_with(row, result.name, errors[0]);
       S.rows.delete(result.id);
-      if (errors.length) problems.push([result.name, errors[0]]);
     }
   }
+  // Never a line a file: "37 files named … · why", once for the bundle.
+  for (const [key, [count, why]] of together) problems.push([named(count, S.bundles[key]), why]);
   for (const row of S.rows.values()) {
     if (row.status) Object.assign(row, { status: '', checked: false });
   }
@@ -1894,7 +2065,7 @@ function wrapUp(trouble) {
   document.title = 'headroom';
   render();
   if (RM.data) renderReminders();
-  showResult(freed, moved, results.length, problems, notReached, trouble, said, movedCount);
+  showResult(freed, moved, results.length - undone, problems, notReached, trouble, said, movedCount, undone);
   loadGrowth();
   refreshBlocked();
   if (attached) {
@@ -1903,7 +2074,7 @@ function wrapUp(trouble) {
   }
 }
 
-function showResult(freed, moved, done, problems, notReached, trouble, said, movedCount) {
+function showResult(freed, moved, done, problems, notReached, trouble, said, movedCount, notDone) {
   const lines = [];
   if (moved > 0) lines.push(freed > 0 ? `${size(moved)} more went to the Trash. ${BACK}` : `${movedCount === 1 ? 'It is' : 'They are'} in the Trash. ${BACK}`);
   if (S.disk) lines.push(`This Mac ${freed > 0 ? 'now has' : 'has'} ${size(S.disk.free_kb)} free.`);
@@ -1916,14 +2087,14 @@ function showResult(freed, moved, done, problems, notReached, trouble, said, mov
   // "2 not moved" when nothing went at all; "not fully" when some of it did.
   const undone = (freed > 0 || moved > 0 ? 'not fully ' : 'not ') + (S.jobTrash ? 'moved' : 'deleted');
   const notes = [];
-  if (problems.length) notes.push(el('li', { class: 'mono', text: `${problems.length} ${undone}` }),
+  if (problems.length) notes.push(el('li', { class: 'mono', text: `${notDone} ${undone}` }),
     ...problems.map(([name, why]) => el('li', {}, el('b', { text: name }), ' · ' + why)));
   if (said.length) notes.push(el('li', { class: 'mono', text: 'Packed' }),
     ...said.map(([name, note]) => el('li', {}, el('b', { text: name }), ' · ' + note)));
   const block = el('section', { class: 'result' + (freed > 0 || moved > 0 ? '' : ' empty'), tabIndex: -1, 'aria-labelledby': 'r-title' },
     el('div', { class: 'wrap' },
       el('div', { class: 'mono r-strip' },
-        el('span', { text: `Done · ${items(done - problems.length)} cleared` }),
+        el('span', { text: `Done · ${items(done)} cleared` }),
         el('button', { type: 'button', class: 'btn btn-ghost soft sm', text: 'Dismiss', onclick: dismissResult })),
       title,
       el('div', { class: 'r-cols' },
@@ -1931,7 +2102,7 @@ function showResult(freed, moved, done, problems, notReached, trouble, said, mov
         notes.length > 0 && el('ul', { class: 'r-list' }, ...notes))));
   $('result').replaceChildren(block);
   announce([title.textContent + '.', ...lines, ...said.map(([name, note]) => `${name}: ${note}`),
-    problems.length ? `${items(problems.length)} ${undone}.` : ''].join(' '));
+    problems.length ? `${items(notDone)} ${undone}.` : ''].join(' '));
   if (S.view !== 'clean') return;
   block.focus({ preventScroll: true });
   block.scrollIntoView({ block: 'nearest', behavior: reduceMotion() ? 'auto' : 'smooth' });

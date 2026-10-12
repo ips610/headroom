@@ -1160,14 +1160,26 @@ try:
             rows, notice = cleaner.scan_screenshots()
         return named(rows), notice, recorder
     shots, notice, recorder = scan_shots()
-    assert sorted(shots) == sorted([f"Screenshots from {month(45)}", f"Screenshots from {month(100)}",
-                                    "Screenshots from the last 30 days", f"Screen recordings from {month(45)}"]), sorted(shots)
-    assert notice == "" and sorted(shots[f"Screenshots from {month(45)}"]["paths"]) == sorted(old_shots + [renamed])
-    assert shots[f"Screenshots from {month(100)}"]["paths"] == [older_shot]
-    assert shots[f"Screen recordings from {month(45)}"]["paths"] == [old_clip], "recordings get their own rows"
-    assert shots[f"Screenshots from {month(45)}"]["detail"] == "4 files · ~/Desktop"
-    recent = shots["Screenshots from the last 30 days"]
-    assert recent["paths"] == [new_shot] and recent["recent"] and "leaves it out" in recent["note"]
+    finder = ["/usr/bin/osascript", "-e", cleaner.TRASH_SCRIPT]
+    in_bundle = lambda key: sorted(row["paths"][0] for row in shots.values() if row["bundle"]["key"] == key)
+    month_of = lambda kind, days: f"shots:{kind}:" + time.strftime("%Y-%m", time.localtime(time.time() - days * cleaner.DAY))
+    # A row for each file, so each can be looked at and picked. A month's files share a bundle,
+    # which the page folds into one line.
+    assert notice == "" and all(row["paths"] == [os.path.join(desktop, row["name"])] for row in shots.values()), list(shots)
+    assert in_bundle(month_of("Screenshots", 45)) == sorted(old_shots + [renamed])
+    assert in_bundle(month_of("Screenshots", 100)) == [older_shot]
+    assert in_bundle(month_of("Screen recordings", 45)) == [old_clip], "recordings get their own bundles"
+    assert in_bundle("shots:Screenshots:recent") == [new_shot] and len(shots) == 7
+    august = shots[os.path.basename(old_shots[0])]
+    assert august["bundle"] == {"key": month_of("Screenshots", 45), "noun": f"screenshots from {month(45)}", "detail": "~/Desktop",
+                                "note": "", "folder": desktop, "min": 1}, august["bundle"]
+    assert august["bundle"] is shots["invoice proof.png"]["bundle"] and august["kb"] >= 40 and august["inside"] == august["name"]
+    assert august["detail"] == "~/Desktop · added 6 weeks ago" and time.time() - 46 * cleaner.DAY < august["when"] < time.time() - 44 * cleaner.DAY
+    shown = cleaner.public(august, "")
+    assert shown["bundle"] == august["bundle"]["key"] and shown["inside"] == august["name"] and shown["when"] == august["when"]
+    assert "paths" not in shown and desktop not in json.dumps(shown), "the page still gets ids and names, never a path"
+    recent = shots[os.path.basename(new_shot)]
+    assert recent["recent"] and "leaves it out" in recent["note"] and "leaves them out" in recent["bundle"]["note"]
     offered = {p for row in shots.values() for p in row["paths"]}
     assert custom not in offered and not offered & set(not_shots), "nothing a person named, nothing outside the folder"
     assert not any(os.path.islink(p) or os.path.isdir(p) for p in offered)
@@ -1175,32 +1187,51 @@ try:
         assert row["group"] == "shots" and row["trash"] and not row["cmd"], row
         assert not cleaner.public(row, "")["safe"], "Safe clean never picks them"
         assert row["recent"] == (row is recent) and (row["note"] == "") == (row is not recent), "the blurb says where they go"
+        assert row["seen"] == {row["paths"][0]: 0o100000}, "a regular file when the scan saw it"
     # Newest first: the last 30 days, then month by month, a month's recordings beside its screenshots.
     ranked = sorted(shots.values(), key=lambda row: -cleaner.public(row, "")["rank"])
-    assert ranked[0] is recent and ranked[-1]["name"] == f"Screenshots from {month(100)}", [row["name"] for row in ranked]
-    assert shots[f"Screen recordings from {month(45)}"]["rank"] == shots[f"Screenshots from {month(45)}"]["rank"]
+    assert ranked[0] is recent and ranked[-1]["paths"] == [older_shot], [row["name"] for row in ranked]
+    assert shots[os.path.basename(old_clip)]["rank"] == august["rank"]
     assert "screenshots" not in cleaner.SAFE_SOURCES and "shots" not in cleaner.SAFE_GROUPS
     asked = [p for call in recorder.calls if call[0] == "/usr/bin/mdls" for p in call[4:]]
     assert asked and all(os.path.dirname(p) == desktop for p in asked), "Spotlight is asked about that folder's files only"
     # They always go to the Trash through Finder, whatever the Move to Trash switch says.
     with recording(Recorder(never=("/bin/rm",))) as recorder:
-        out = cleaner.delete(shots[f"Screenshots from {month(100)}"])
-    assert recorder.calls == [["/usr/bin/osascript", "-e", cleaner.TRASH_SCRIPT, older_shot]] and out["errors"] == []
+        out = cleaner.delete(shots[os.path.basename(older_shot)])
+    assert recorder.calls == [finder + [older_shot]] and out["errors"] == []
     assert os.path.exists(older_shot), "the recorder stood in for Finder"
     # Only the very files the scan looked at: one that has since become a link or a folder stays.
-    swapped = shots[f"Screenshots from {month(45)}"]
     os.rename(old_shots[0], old_shots[0] + ".aside")
     os.symlink(kept_outside, old_shots[0])
     os.rename(old_shots[1], old_shots[1] + ".aside")
     os.makedirs(old_shots[1])
     with recording(Recorder(never=("/bin/rm",))) as recorder:
-        out = cleaner.delete(swapped)
-    assert recorder.calls == [["/usr/bin/osascript", "-e", cleaner.TRASH_SCRIPT] + sorted([old_shots[2], renamed])], recorder.calls
-    assert len(out["errors"]) == 2 and all("not what the scan found" in why for why in out["errors"]), out
+        cleaner.JOB.update(results=[], done_kb=0, stopping=False)
+        cleaner.run_job([shots[os.path.basename(p)] for p in old_shots + [renamed]])
+    assert recorder.calls == [finder + [old_shots[2], renamed]], ("one call for the rows that can go", recorder.calls)
+    assert [bool(r["errors"]) for r in cleaner.JOB["results"]] == [True, True, False, False], cleaner.JOB["results"]
+    assert all("not what the scan found" in r["errors"][0] for r in cleaner.JOB["results"][:2])
+    said = cleaner.history()[0]
+    assert said["what"] == f"4 screenshots from {month(45)}" and said["result"] == "partly" and said["section"] == "shots", said
+    assert said["error"].startswith("2 of them stayed. Left alone") and len(said["paths"]) == 4 and said["kb"] >= 80, said
     os.remove(old_shots[0])
     os.rmdir(old_shots[1])
     for moved in old_shots[:2]:
         os.rename(moved + ".aside", moved)
+    # A screenshot is often under 1 MB, which alone isn't worth a line. In a month that adds up
+    # to one, every file of it is kept; a lone small one is not.
+    small_month = [shot(f"Screenshot 2026-01-0{n} at 10.00.00.png", 250, kb=2) for n in range(1, 6)]
+    lone_small = shot("Screenshot 2024-01-01 at 10.00.00.png", 700, kb=2)
+    with recording(Recorder(answer=capture_says, fakes=["/usr/bin/defaults"])):
+        listed = cleaner.scan("screenshots")
+    names = [r["name"] for r in listed["items"]]
+    assert {os.path.basename(p) for p in small_month} <= set(names) and os.path.basename(lone_small) not in names, names
+    assert listed["bundles"][month_of("Screenshots", 45)] == {"noun": f"screenshots from {month(45)}", "detail": "~/Desktop",
+                                                              "note": "", "min": 1}, listed["bundles"]
+    assert desktop not in json.dumps(listed), "nor does a bundle carry its folder's path to the page"
+    for extra in small_month + [lone_small]:
+        os.remove(extra)
+    cleaner.FOUND.pop("screenshots", None)
     # The name chosen in macOS's settings counts once it is set there.
     chosen["name"] = "Capture"
     assert custom in {p for row in scan_shots()[0].values() for p in row["paths"]}
@@ -1235,7 +1266,6 @@ try:
     switch_link = os.path.join(cleaner.HOME, "Library", "Caches", "com.switch.link")
     os.symlink(os.path.join(outside, "precious"), switch_link)
     switched = cleaner.item("apps", "switch cache", switch_paths + [switch_link], 200)
-    finder = ["/usr/bin/osascript", "-e", cleaner.TRASH_SCRIPT]
     assert cleaner.public(switched, "", True)["blocked"] == "" and not switched["trash"]
     with recording(Recorder(never=("/bin/rm",))) as recorder:
         out = cleaner.delete(switched, to_trash=True)
@@ -1483,10 +1513,9 @@ try:
     imported = ["LM Studio model Qwen-9B-GGUF", "LM Studio model Model-B", "GPT4All model mistral.gguf", "Jan model llama3",
                 "Ollama models"]          # these apps also take models you bring yourself
     loose_names = ["weights / final.pt", "weights / fresh.safetensors", "hf / pytorch_model.bin", "checkpoints / step-100.bin",
-                   "models / net.h5", "Documents / Classifier.mlpackage", "weights / in-repo.pt",
-                   "7 files named concept_predictor.pth in runs"]
+                   "models / net.h5", "Documents / Classifier.mlpackage", "weights / in-repo.pt", "out / concept_predictor.pth"]
     assert sorted(models) == sorted(downloaded + imported + loose_names + ["Hugging Face downloads", "PyTorch downloads"]), sorted(models)
-    assert notice == "" and len(found) == len(models)
+    assert notice == "" and len(found) == len(models) + 6, "a row for every file: seven of them have one name"
     for name in downloaded + imported + loose_names:
         assert models[name]["group"] == "models" and not cleaner.public(models[name], "")["safe"], name
         assert models[name]["trash"] == (name not in downloaded), (name, "only what a tool downloaded is deleted outright")
@@ -1504,11 +1533,26 @@ try:
     assert models["Documents / Classifier.mlpackage"]["paths"] == [package] and models["Documents / Classifier.mlpackage"]["kb"] >= 100
     # A model inside a git project is listed, and left out when the whole section is ticked.
     assert models["weights / in-repo.pt"]["recent"] and "git project" in models["weights / in-repo.pt"]["note"]
-    # A training run's same file in many folders is one row, and stays one row as their number changes.
-    group = models["7 files named concept_predictor.pth in runs"]
-    assert sorted(group["paths"]) == sorted(runs) and group["kb"] >= 700 and group["trash"] and not group["recent"]
-    assert group["detail"].startswith("~/Documents/runs · ") and group["same"] == "named:concept_predictor.pth:" + os.path.join(docs, "runs")
-    assert all(row["seen"] == dict.fromkeys(row["paths"], row["seen"][row["paths"][0]]) for row in found if row["trash"] and row["seen"])
+    # A training run's same file in many folders: a row each, so each can be looked at and picked,
+    # and one bundle for the page to fold them into, named after the file and the folder they share.
+    same_name = [row for row in found if row["name"] == "out / concept_predictor.pth"]
+    assert sorted(row["paths"][0] for row in same_name) == sorted(runs) and len({row["id"] for row in same_name}) == 7
+    assert all(row["bundle"] is same_name[0]["bundle"] and row["kb"] >= 100 and row["trash"] and not row["recent"] for row in same_name)
+    assert same_name[0]["bundle"] == {
+        "key": "named:concept_predictor.pth", "noun": "files named concept_predictor.pth in runs",
+        "detail": "~/Documents/runs · newest added or changed 2 months ago",
+        "note": "They go to the Trash, in case you trained them yourself.", "folder": os.path.join(docs, "runs"), "min": cleaner.MANY}
+    assert sorted(row["inside"] for row in same_name) == [f"run{n:02}/out/concept_predictor.pth" for n in range(7)], "where each one is"
+    assert final["bundle"]["key"] == "named:final.pt" and final["inside"] == "final.pt" and final["when"] > 0
+    # The rules for what a section tick leaves out go file by file, inside a bundle too: one run
+    # that was written to today is left out, its six neighbours are not.
+    os.utime(runs[6], None)
+    again = [row for row in spotlit(cleaner.scan_models)[0] if row["name"] == "out / concept_predictor.pth"]
+    assert [row["recent"] for row in sorted(again, key=lambda row: row["paths"])] == [False] * 6 + [True]
+    assert all(cleaner.LEFT_OUT in row["note"] for row in again if row["recent"])
+    assert again[0]["bundle"]["detail"] == "~/Documents/runs · newest added or changed today"
+    age(runs[6], 60)
+    assert all(row["seen"] == {row["paths"][0]: row["seen"][row["paths"][0]]} for row in found if row["seen"])
     # Only what is known to be a download, by name: not everything that isn't a model.
     assert sorted(models["Hugging Face downloads"]["paths"]) == sorted([hf_data, hf_xet]) and models["Hugging Face downloads"]["group"] == "dev"
     assert models["Hugging Face downloads"]["detail"] == "Datasets and other downloads. Models and your login stay. ~/.cache/huggingface"
@@ -1601,26 +1645,109 @@ try:
     spot["hits"] = [unzipped, packed, tarball, notes_zip] + sets + done_sets + not_archives
     found, notice = spotlit(cleaner.scan_archives)
     archives = named(found)
-    assert sorted(archives) == sorted(["work / project.zip", "work / data.csv.gz", "work / bundle.tar.gz", "Downloads / notes.zip",
-                                       "7 archives in sets", "6 archives already unzipped in done"]), sorted(archives)
-    assert notice == "" and all(row["group"] == "archives" and row["trash"] and row["seen"] for row in found)
+    in_sets = [f"sets / part{n:02}.zip" for n in range(7)]
+    in_done = [f"done / set{n}.7z" for n in range(6)]
+    assert sorted(archives) == sorted(["work / project.zip", "work / data.csv.gz", "work / bundle.tar.gz", "Downloads / notes.zip"]
+                                      + in_sets + in_done), sorted(archives)
+    assert notice == "" and all(row["group"] == "archives" and row["trash"] and len(row["paths"]) == 1 for row in found)
+    assert all(row["seen"] == {row["paths"][0]: 0o100000} and row["when"] > 0 for row in found)
     assert not any(cleaner.public(row, "")["safe"] or row["cmd"] for row in found), "never Safe clean, never a command"
     assert archives["work / project.zip"]["note"] == "A folder named project is next to it."
     assert archives["work / data.csv.gz"]["note"] == "A file named data.csv is next to it."
     assert archives["work / bundle.tar.gz"]["note"] == "" and "~/Documents/work · added" in archives["work / bundle.tar.gz"]["detail"]
     assert {name for name, row in archives.items() if cleaner.public(row, "")["rank"]} == {
-        "work / project.zip", "work / data.csv.gz", "6 archives already unzipped in done"}, "the unzipped ones come first"
-    assert archives["7 archives in sets"]["paths"] == sets, "a folder full of them is one row"
-    assert archives["7 archives in sets"]["detail"] == "~/Documents/sets · part00.zip, part01.zip, part02.zip and 4 more"
-    assert archives["7 archives in sets"]["same"] == "archives:" + os.path.join(docs, "sets") + ":False", "known by its folder, not its count"
-    assert archives["6 archives already unzipped in done"]["paths"] == done_sets
+        "work / project.zip", "work / data.csv.gz", *in_done}, "the unzipped ones come first"
+    # A folder full of them: a row for each archive, and one bundle for the page to fold them into.
+    assert [archives[name]["paths"][0] for name in in_sets] == sets and [archives[name]["inside"] for name in in_sets] == [
+        os.path.basename(p) for p in sets]
+    sets_key = archives[in_sets[0]]["bundle"]["key"]
+    assert re.fullmatch(r"archives:[0-9a-f]{12}:0", sets_key), "the folder is in the key as a hash, not as a path"
+    assert archives[in_sets[0]]["bundle"] == {
+        "key": sets_key, "noun": "archives in sets",
+        "detail": "~/Documents/sets · newest added today", "note": "", "folder": os.path.join(docs, "sets"), "min": cleaner.MANY}
+    assert all(archives[name]["bundle"] is archives[in_sets[0]]["bundle"] for name in in_sets)
+    assert archives[in_done[0]]["bundle"]["noun"] == "archives already unzipped in done" and "its own name" in archives[in_done[0]]["bundle"]["note"]
+    assert archives["work / project.zip"]["bundle"] is archives["work / data.csv.gz"]["bundle"] is not archives["work / bundle.tar.gz"]["bundle"]
     offered = [p for row in found for p in row["paths"]]
     assert len(offered) == len(set(offered)) and not set(offered) & set(not_archives)
     assert all(p.startswith(cleaner.HOME + os.sep) and os.path.isfile(p) and not os.path.islink(p) for p in offered)
-    with recording(Recorder(never=("/bin/rm",))) as recorder:
-        assert cleaner.delete(archives["7 archives in sets"])["errors"] == []
+
+    # The job hands rows that go to the Trash to Finder together: seven rows, one call, and each
+    # row its own result. History says it once, for the bundle.
+    def job(rows, to_trash=False, **recorder_options):
+        with recording(Recorder(never=("/bin/rm",), **recorder_options)) as recorder:
+            cleaner.JOB.update(results=[], done_kb=0, stopping=False)
+            cleaner.run_job(rows, to_trash)
+        cleaner.JOB["stopping"] = False
+        return recorder, cleaner.JOB["results"]
+    lines_before = len(cleaner.history())
+    recorder, results = job([archives[name] for name in in_sets])
     assert recorder.calls == [finder + sets], recorder.calls
+    assert [r["id"] for r in results] == [archives[name]["id"] for name in in_sets] and all(r["trashed"] and not r["errors"] for r in results)
     assert all(os.path.exists(p) for p in sets), "the recorder stood in for Finder"
+    said = cleaner.history()[0]
+    assert len(cleaner.history()) == lines_before + 1 and said["what"] == "7 archives in sets" and said["result"] == "trashed", said
+    assert said["paths"] == [cleaner.tilde(p) for p in sets] and said["section"] == "archives" and "error" not in said
+    # One row of a bundle is said by its own name.
+    job([archives[in_done[0]]])
+    assert cleaner.history()[0]["what"] == "done / set0.7z" and cleaner.history()[0]["result"] == "trashed"
+    # Finder answers for each path, and each answer reaches the row that path belongs to: here
+    # the third of seven is refused, and it is the third row that says so.
+    for name in in_sets:
+        archives[name]["kb"] = 40
+    recorder, results = job([archives[name] for name in in_sets],
+                            answer=lambda command: (0, "".join("-128\n" if p == sets[2] else "0\n" for p in command[3:])))
+    assert [r["errors"] for r in results] == [[], [], ["You cancelled, so it stayed."], [], [], [], []], [r["errors"] for r in results]
+    assert [r["name"] for r in results if r["left_kb"]] and results[2]["id"] == archives[in_sets[2]]["id"]
+    said = cleaner.history()[0]
+    assert said["what"] == "7 archives in sets" and said["result"] == "partly" and said["error"] == "You cancelled, so it stayed.", said
+    # A call that fails as a whole is said for every row in it.
+    recorder, results = job([archives[name] for name in in_sets], returncode=1, stderr="execution error: boom (-99)")
+    assert len(recorder.calls) == 1 and [r["errors"] for r in results] == [["execution error: boom (-99)."]] * 7
+    assert cleaner.history()[0]["result"] == "failed" and cleaner.history()[0]["error"].startswith("7 of them stayed. ")
+    # A hundred paths to a call, in the order they were picked. Stop is asked between calls: the
+    # rows of the call under way finish, the rows still waiting are left as they were.
+    crowd = [cleaner.item("archives", f"crowd / a{n:03}.zip", [os.path.join(docs, "crowd", f"a{n:03}.zip")], 40) for n in range(230)]
+    for row in crowd:
+        row["trash"] = True
+    recorder, results = job(crowd)
+    assert [call[3:] for call in recorder.calls] == [[r["paths"][0] for r in crowd[a:b]] for a, b in ((0, 100), (100, 200), (200, 230))]
+    assert [r["id"] for r in results] == [r["id"] for r in crowd], "every row has its result, in order"
+    for row in crowd:
+        row["kb"] = 40
+
+    def stop_after_first(command):
+        cleaner.JOB["stopping"] = True
+        return 0, "0\n" * len(command[3:])
+    recorder, results = job(crowd, answer=stop_after_first)
+    assert len(recorder.calls) == 1 and [r["id"] for r in results] == [r["id"] for r in crowd[:100]], (len(recorder.calls), len(results))
+    # Rows that are removed another way keep their place: what waits for Finder goes first.
+    for row in crowd:
+        row["kb"] = 40
+    plain_cache = os.path.dirname(put("Library", "Caches", "com.switch.between", "blob", kb=100))
+    between = cleaner.item("apps", "between", [plain_cache], 100)
+    with recording(Recorder()) as recorder:
+        cleaner.JOB.update(results=[], done_kb=0, stopping=False)
+        cleaner.run_job([crowd[0], crowd[1], between, crowd[2]])
+    assert recorder.calls == [finder + [crowd[0]["paths"][0], crowd[1]["paths"][0]], finder + [crowd[2]["paths"][0]]], recorder.calls
+    assert [r["name"] for r in cleaner.JOB["results"]] == [crowd[0]["name"], crowd[1]["name"], "between", crowd[2]["name"]]
+    assert not os.path.exists(plain_cache) and [r["trashed"] for r in cleaner.JOB["results"]] == [True, True, False, True]
+    # Stop during the call to Finder: the row that would have been removed next, another way, is not.
+    for row in crowd:
+        row["kb"] = 40
+    spared = os.path.dirname(put("Library", "Caches", "com.switch.spared", "blob", kb=100))
+    with recording(Recorder(answer=stop_after_first)) as recorder:
+        cleaner.JOB.update(results=[], done_kb=0, stopping=False)
+        cleaner.run_job([crowd[0], cleaner.item("apps", "spared", [spared], 100), crowd[1]])
+    cleaner.JOB["stopping"] = False
+    assert [r["name"] for r in cleaner.JOB["results"]] == [crowd[0]["name"]] and os.path.exists(spared), cleaner.JOB["results"]
+    assert recorder.calls == [finder + crowd[0]["paths"]]
+    shutil.rmtree(spared)
+    # A row with more paths than fit in one call is handed over by itself, a hundred at a time.
+    heap = cleaner.item("archives", "heap", [os.path.join(docs, "heap", f"h{n:03}") for n in range(150)], 40)
+    heap["trash"] = True
+    recorder, results = job([crowd[3], heap, crowd[4]])
+    assert [len(call) - 3 for call in recorder.calls] == [1, 100, 50, 1] and [r["name"] for r in results] == [crowd[3]["name"], "heap", crowd[4]["name"]]
     spot["hits"] = []
     assert spotlit(cleaner.scan_archives) == ([], ""), "nothing found says nothing: an empty section is enough"
 
@@ -1732,6 +1859,20 @@ try:
     snap(0, "caches", ("apps", "big", "/c", 0))                         # deleted just after midnight
     assert grew() == {"span": "this week", "sections": {"dev": 5000},
                       "top": [{"name": "npm downloads", "group": "dev", "kb": 5000, "new": False}]}, grew()
+    # The rows of a bundle are kept as one entry under the bundle's key: its files come and go,
+    # and it grows as one thing, said once. One row alone is said by its own name.
+    forget()
+
+    def bundle_rows(count, key="named:w.pth", noun="files named w.pth in runs"):
+        made = [cleaner.item("models", f"run{n} / w.pth", [f"/r/{n}/w.pth"], 1000) for n in range(count)]
+        for row in made:
+            row["bundle"] = {"key": key, "noun": noun, "detail": "", "note": "", "folder": "/r", "min": 5}
+        return made
+    cleaner.keep_sizes("models", bundle_rows(7) + bundle_rows(1, "named:solo.pt"), noon - 7 * cleaner.DAY)
+    cleaner.keep_sizes("models", bundle_rows(9) + bundle_rows(1, "named:solo.pt"), noon)
+    assert json.load(open(sizes_file))["2026-10-12"]["models"] == {
+        "named:w.pth": ["models", "Files named w.pth in runs", 9000], "named:solo.pt": ["models", "run0 / w.pth", 1000]}
+    assert grew()["top"] == [{"name": "Files named w.pth in runs", "group": "models", "kb": 2000, "new": False}], grew()["top"]
     # The file is compacted: one snapshot a day, and nothing over 30 days old.
     forget()
     for days_ago in range(45, -1, -1):
@@ -2331,6 +2472,45 @@ try:
     progress = wait_for_job()
     assert not os.path.exists(doubt_cache) and progress["trash"] is False and not progress["results"][0]["trashed"]
     assert json.load(open(sizes_file))[today]["caches"][doubt["id"]] == ["apps", "doubt", 0]
+
+    # Bundles over the API. The page gets a row for each file (ids and names, never a path) and
+    # each bundle's own line once. Any of the rows can be cleared by id; history says it once.
+    spot["hits"], spot["code"] = sets + done_sets, 0
+    cleaner.go_caches = lambda: (None, [])
+    sets_folder = os.path.join(docs, "sets")
+    with recording(Recorder(answer=spot_says, fakes=["/usr/bin/mdfind", "/usr/bin/defaults"], never=("/bin/rm",))) as recorder:
+        listed = call("/api/scan?source=archives")[1]
+        members = {r["inside"]: r for r in listed["items"] if r["bundle"] == sets_key}
+        assert sorted(members) == [os.path.basename(p) for p in sets], sorted(members)
+        assert listed["bundles"][sets_key] == {"noun": "archives in sets", "detail": "~/Documents/sets · newest added today",
+                                               "note": "", "min": cleaner.MANY}, listed["bundles"]
+        assert all("paths" not in r and r["when"] > 0 for r in members.values()) and cleaner.HOME not in json.dumps(listed)
+        some = [members[os.path.basename(p)]["id"] for p in sets[:3]]
+        assert call("/api/delete", body={"ids": some})[0] == 200
+        progress = wait_for_job()
+        # Show in Finder, by row id: the row's file, or the folder its bundle shares. Only what the
+        # last scan listed, and looked at again before it is shown.
+        fifth = members[os.path.basename(sets[4])]["id"]
+        assert call("/api/reveal", body={"id": fifth})[0] == 200 and call("/api/reveal", body={"id": fifth, "bundle": True})[0] == 200
+        for unknown in ({"id": "0123456789abcdef"}, {"id": "0123456789abcdef", "bundle": True}):
+            assert call("/api/reveal", body=unknown)[0] == 404, unknown
+        assert call("/api/reveal", body={"path": sets[4]})[0] == 400, "a path is never accepted"
+        os.rename(sets[5], sets[5] + ".aside")
+        assert call("/api/reveal", body={"id": members[os.path.basename(sets[5])]["id"]})[0] == 404, "gone since the scan"
+        os.rename(sets[5] + ".aside", sets[5])
+        os.rename(sets_folder, sets_folder + "-real")
+        os.symlink(sets_folder + "-real", sets_folder)
+        assert call("/api/reveal", body={"id": fifth, "bundle": True})[0] == 404 and call("/api/reveal", body={"id": fifth})[0] == 404, \
+            "nothing is shown by way of a link"
+        os.remove(sets_folder)
+        os.rename(sets_folder + "-real", sets_folder)
+    assert [c for c in recorder.calls if c[0] == "/usr/bin/osascript"] == [finder + sets[:3]], "three rows, one call to Finder"
+    assert [c for c in recorder.calls if c[0] == "/usr/bin/open"] == [["/usr/bin/open", "-R", sets[4]], ["/usr/bin/open", sets_folder]]
+    assert [r["id"] for r in progress["results"]] == some and all(r["trashed"] and not r["errors"] for r in progress["results"])
+    newest = call("/api/history")[1]["items"][0]
+    assert newest["what"] == "3 archives in sets" and newest["result"] == "trashed" and newest["paths"] == [cleaner.tilde(p) for p in sets[:3]], newest
+    cleaner.go_caches = real_go
+    cleaner.FOUND.pop("archives", None)
 
     # One scan of a source at a time: a second request while the first is running waits for it and
     # gets the same answer, so "Scan again" never starts a slow source's programs twice over.

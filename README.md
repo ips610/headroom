@@ -97,6 +97,13 @@ empty the Trash. Rows that only a command can clear (Homebrew, Docker, Ollama, s
 A section that grew a lot since about a week ago says so next to its size, like "+4.2 GB this
 week", so you can see what's eating the disk before it's full.
 
+Files that belong together show as one line: a month of screenshots, the archives in one folder,
+or a model file that a training run left in a hundred folders under the same name. The line says
+how many there are, how big they are together and where they are. Press **Show the 118 files** to
+open it and you get every file with its own size, date and checkbox, largest first, so you can
+keep the three runs you still need and tick the rest. Ticking the line itself ticks all of them.
+Rows in these sections also have **Show in Finder**, so you can look before you decide.
+
 ![The App caches section opened in light mode, showing each cache with its size and where it lives](docs/screenshots/clean-light.png)
 
 If you just want space back, press **Safe clean**. It picks only what can't hurt: app caches,
@@ -156,9 +163,9 @@ just tells you what it couldn't see.
 | Project build folders | `node_modules`, `.next`, `dist`, Rust `target`, Swift `.build`, Flutter `build` and `.dart_tool` |
 | Leftovers of deleted apps | settings, caches, saved windows, containers and launch agents of apps that aren't on your Mac any more |
 | Backups, emulators and big downloads | iPhone and iPad backups (these go to the Trash, since one may be your only copy), Android emulators and system images, iOS simulators, unused Docker images, stopped Docker containers and volumes no container uses, Xcode archives, unfinished downloads of torrents you removed from qBittorrent |
-| Model weight files | models that Hugging Face, PyTorch, Ollama, LM Studio, GPT4All and Jan downloaded, one row each, and model files of 100 MB or more anywhere else in your home folder (`.gguf`, `.safetensors`, `.pt` and the like). A `.bin` or `.h5` only counts next to a `config.json` or `tokenizer.json`, or in a folder called `models` or `checkpoints`. The same file name in many folders (a training run) is one row |
+| Model weight files | models that Hugging Face, PyTorch, Ollama, LM Studio, GPT4All and Jan downloaded, one row each, and model files of 100 MB or more anywhere else in your home folder (`.gguf`, `.safetensors`, `.pt` and the like). A `.bin` or `.h5` only counts next to a `config.json` or `tokenizer.json`, or in a folder called `models` or `checkpoints`. The same file name in many folders (a training run) is one line that opens to the files |
 | Zip files and other archives | `.zip`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tar.xz`, `.7z` and `.rar` of 20 MB or more, and a plain `.gz`, `.bz2` or `.xz` from 100 MB. The ones with a folder of the same name next to them come first, because they look unzipped already. Zipped apps in Downloads and on the Desktop stay under Installer files, and archives inside a git project aren't listed |
-| Screenshots and screen recordings | the ones macOS itself made, in the folder it saves them to (the Desktop unless you changed it), one row per month, newest first |
+| Screenshots and screen recordings | the ones macOS itself made, in the folder it saves them to (the Desktop unless you changed it), one line per month that opens to the files, newest month first |
 
 The last five aren't really cache. They won't come back on their own, so headroom keeps them
 apart and warns you before deleting them.
@@ -194,7 +201,8 @@ found by their names only, which misses ones macOS named in another language tha
   Trash instead of deleting them. It's off unless you turn it on.
 - **History** shows a chart of free space over time, with a dot wherever headroom freed some,
   then what grew since about a week ago (sections and single rows, biggest first), and lists
-  everything it deleted or moved to the Trash, with when, what and where. That list is kept in
+  everything it deleted or moved to the Trash, with when, what and where. Files that went together
+  are one entry ("37 files named … moved to the Trash"), not one each. That list is kept in
   `~/Library/Logs/headroom/history.jsonl`. For "what grew", headroom keeps the sizes from one
   scan a day for 30 days. Until it has a scan from an earlier day it says "Not enough history
   yet", and if the one it compares with isn't about a week old it says how many days it is.

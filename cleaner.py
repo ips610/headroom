@@ -60,7 +60,7 @@ RUN = secrets.token_hex(8)
 NONCE = secrets.token_urlsafe(16)
 
 # install.py and package.sh read the version from here. A newer release on GitHub shows up in the app.
-VERSION = "1.6"
+VERSION = "1.7"
 RELEASES = "https://github.com/ips610/headroom/releases"
 
 APPLICATIONS = "/Applications"
@@ -82,7 +82,7 @@ MODEL_MIN_KB = 100 * 1000 * 1000 // 1024     # loose model files under 100 MB ar
 MODEL_RECENT = 30 * DAY    # a model used this recently: ticking the whole section leaves it out
 ARCHIVE_MIN_KB = 20 * 1000 * 1000 // 1024    # nor archives under 20 MB
 PACKED_MIN_KB = 100 * 1000 * 1000 // 1024    # a plain .gz, .bz2 or .xz is often one data file: only at 100 MB
-MANY = 5                   # more archives in one folder, or model files of one name, than this share a row
+MANY = 5                   # more archives in one folder, or model files of one name, than this fold into one line
 SAFE_GROUPS = ("apps", "temp")   # what "Safe clean" ticks, with installers older than a month
 
 # Folder names worth a plainer label, and the section they belong in.
@@ -328,6 +328,12 @@ def item(group, name, paths, kb, detail="", cmd=None, quit=None, blocked=""):
         "weighs": 0,         # what a row without a size of its own is sorted by (a .git folder's size)
         "same": "",          # what "What grew" knows a row by when its name and paths change (a count in the name)
         "seen": {},          # path -> the kind of file the scan saw there; checked again before it moves
+        # Rows that belong together (a month's screenshots, one file name in many folders) share
+        # one of these, and the page folds them into a line that opens: {key, noun, detail, note,
+        # folder, min}. Each is still a row of its own, picked and cleared by its own id.
+        "bundle": None,
+        "inside": "",        # what the row is called inside its bundle: its path from the shared folder
+        "when": 0,           # when it was added or changed, for sorting
     }
 
 
@@ -1381,8 +1387,9 @@ def capture_names():
 
 def scan_screenshots():
     """Screenshots and screen recordings macOS made, in the one folder it saves them to and never
-    its subfolders. A row for each month, newest first; the last 30 days are a row that ticking the
-    whole section leaves out. They are yours, not a cache, so every row goes to the Trash."""
+    its subfolders. A row for each file; a month's files are one bundle, the newest month first,
+    and ticking the whole section leaves out the last 30 days. They are yours, not a cache, so
+    every row goes to the Trash."""
     folder, shut = capture_folder(), []
     if os.path.realpath(folder) != folder or not deletable(os.path.join(folder, "x")):
         return [], (f"macOS saves screenshots in {tilde(folder)}, which isn't a plain folder inside your home "
@@ -1399,24 +1406,24 @@ def scan_screenshots():
             if stat.S_ISREG(info.st_mode) and not dataless(info):
                 files.append((path, info))
     (flagged, answered), named = flagged_captures([path for path, _ in files]), capture_names()
-    groups = {}
+    rows, months = [], {}
     for path, info in files:
         if path in flagged or named.fullmatch(os.path.splitext(os.path.basename(path))[0]):
             made = getattr(info, "st_birthtime", info.st_mtime)
             kind = "Screen recordings" if path.lower().endswith(CLIP_TYPES) else "Screenshots"
             month = time.strftime("%Y-%m", time.localtime(made)) if made < time.time() - SHOT_AGE else ""
-            groups.setdefault((kind, month), []).append((path, info))
-    rows = []
-    for (kind, month), found in sorted(groups.items()):
-        when = time.strftime("%B %Y", time.strptime(month, "%Y-%m")) if month else "the last 30 days"
-        row = item("shots", f"{kind} from {when}", [path for path, _ in found],
-                   sum(info.st_blocks * 512 // 1024 for _, info in found),
-                   f"{count(len(found), 'file', 'files')} · {tilde(folder)}")
-        row["trash"], row["recent"] = True, not month
-        row["note"] = "" if month else "From the last 30 days, so ticking the whole section leaves it out."
-        row["rank"] = int(month.replace("-", "")) if month else 999999       # by month, the newest first
-        row["seen"] = {path: stat.S_IFMT(info.st_mode) for path, info in found}
-        rows.append(row)
+            when = time.strftime("%B %Y", time.strptime(month, "%Y-%m")) if month else "the last 30 days"
+            row = item("shots", os.path.basename(path), [path], info.st_blocks * 512 // 1024,
+                       f"{tilde(folder)} · added {ago(made)}")
+            row["trash"], row["recent"], row["when"], row["inside"] = True, not month, int(made), os.path.basename(path)
+            row["note"] = "" if month else "From the last 30 days, so ticking the whole section leaves it out."
+            row["rank"] = int(month.replace("-", "")) if month else 999999       # by month, the newest first
+            row["seen"] = {path: stat.S_IFMT(info.st_mode)}
+            row["bundle"] = months.setdefault((kind, month), {
+                "key": f"shots:{kind}:{month or 'recent'}", "noun": f"{kind.lower()} from {when}", "detail": tilde(folder),
+                "note": "" if month else "From the last 30 days, so ticking the whole section leaves them out.",
+                "folder": folder, "min": 1})
+            rows.append(row)
     if shut:
         return rows, (f"macOS did not let headroom look inside {shut[0]}. Allow it in System Settings, under "
                       "Privacy & Security, Files and Folders, then scan again.")
@@ -1580,23 +1587,22 @@ def scan_models():
         if kb >= MODEL_MIN_KB:
             named.setdefault(os.path.basename(path), []).append((path, kb, when, stat.S_IFMT(info.st_mode)))
     for base, found in sorted(named.items()):
-        # A training run can leave the same file name in a hundred folders: those are one row.
-        for group in [found] if len(found) > MANY else [[one] for one in found]:
-            paths, newest = [path for path, *_ in group], max(when for _, _, when, _ in group)
-            if len(group) > 1:
-                common = os.path.commonpath([os.path.dirname(path) for path in paths])
-                where = "your home folder" if common == HOME else os.path.basename(common)
-                row = item("models", f"{len(group)} files named {base} in {where}", paths, sum(kb for _, kb, _, _ in group),
-                           f"{tilde(common)} · newest added or changed {ago(newest)}")
-                row["same"] = f"named:{base}:{common}"
-            else:
-                folder = os.path.dirname(paths[0])
-                row = item("models", f"{os.path.basename(folder)} / {base}", paths, group[0][1],
-                           f"{tilde(folder)} · added or changed {ago(newest)}")
-            row["trash"], row["seen"] = True, {path: kind for path, _, _, kind in group}
-            if newest > month_ago:
+        # A training run can leave the same file name in a hundred folders. Each is a row of its
+        # own; together they are one bundle, named after the file and the folder they share.
+        common = os.path.commonpath([os.path.dirname(path) for path, *_ in found])
+        where = "your home folder" if common == HOME else os.path.basename(common)
+        bundle = {"key": "named:" + base, "noun": f"files named {base} in {where}",
+                  "detail": f"{tilde(common)} · newest added or changed {ago(max(when for _, _, when, _ in found))}",
+                  "note": "They go to the Trash, in case you trained them yourself.", "folder": common, "min": MANY}
+        for path, kb, when, kind in found:
+            folder = os.path.dirname(path)
+            row = item("models", f"{os.path.basename(folder)} / {base}", [path], kb,
+                       f"{tilde(folder)} · added or changed {ago(when)}")
+            row["trash"], row["seen"], row["when"], row["bundle"] = True, {path: kind}, int(when), bundle
+            row["inside"] = os.path.relpath(path, common)
+            if when > month_ago:
                 row["recent"], row["note"] = True, LEFT_OUT
-            elif any(repo_root(os.path.dirname(path)) for path in paths):
+            elif repo_root(folder):
                 # A model in a project is more likely part of the project than a leftover.
                 row["recent"], row["note"] = True, "Inside a git project, so ticking the whole section leaves it out."
             row["note"] = f"{row['note']} Goes to the Trash, in case you trained it yourself.".strip()
@@ -1629,27 +1635,22 @@ def scan_archives():
         groups.setdefault((os.path.dirname(path), bool(kind)), []).append((path, kb, base, kind, info))
     rows = []
     for (folder, unzipped), found in sorted(groups.items()):
-        if len(found) > MANY:       # a folder full of them is one row, not hundreds
-            names = [os.path.basename(path) for path, *_ in found]
-            row = item("archives", f"{len(found)} archives {'already unzipped ' if unzipped else ''}in {os.path.basename(folder)}",
-                       [path for path, *_ in found], sum(kb for _, kb, *_ in found),
-                       f"{tilde(folder)} · {', '.join(names[:3])} and {len(names) - 3} more")
-            row["note"] = "Each has a folder or file of its own name next to it." if unzipped else ""
-            row["same"] = f"archives:{folder}:{unzipped}"
-            made = [row]
-        else:
-            made = []
-            for path, kb, base, kind, info in found:
-                row = item("archives", f"{os.path.basename(folder)} / {os.path.basename(path)}", [path], kb,
-                           f"{tilde(folder)} · added {ago(getattr(info, 'st_birthtime', info.st_mtime))}")
-                row["note"] = f"A {kind} named {base} is next to it." if kind else ""
-                made.append(row)
-        for row in made:
-            row["trash"], row["rank"] = True, int(unzipped)
-        rows += made
-    by_path = {path: stat.S_IFMT(info.st_mode) for found in groups.values() for path, _, _, _, info in found}
-    for row in rows:
-        row["seen"] = {path: by_path[path] for path in row["paths"]}
+        # A folder full of them is one bundle, not hundreds of lines; each archive is still its own row.
+        newest = max(getattr(info, "st_birthtime", info.st_mtime) for *_, info in found)
+        # The key goes to the page and into sizes.json: the folder is in it as a hash, not as a path.
+        bundle = {"key": f"archives:{hashlib.sha1(folder.encode()).hexdigest()[:12]}:{int(unzipped)}",
+                  "noun": f"archives {'already unzipped ' if unzipped else ''}in {os.path.basename(folder)}",
+                  "detail": f"{tilde(folder)} · newest added {ago(newest)}",
+                  "note": "Each has a folder or file of its own name next to it." if unzipped else "",
+                  "folder": folder, "min": MANY}
+        for path, kb, base, kind, info in found:
+            made = getattr(info, "st_birthtime", info.st_mtime)
+            row = item("archives", f"{os.path.basename(folder)} / {os.path.basename(path)}", [path], kb,
+                       f"{tilde(folder)} · added {ago(made)}")
+            row["note"] = f"A {kind} named {base} is next to it." if kind else ""
+            row["trash"], row["rank"], row["when"], row["bundle"] = True, int(unzipped), int(made), bundle
+            row["inside"], row["seen"] = os.path.basename(path), {path: stat.S_IFMT(info.st_mode)}
+            rows.append(row)
     return rows, ""
 
 
@@ -2194,7 +2195,8 @@ def public(row, running, to_trash=False):
             "kb": row["kb"], "blocked": blocked(row, running) or (stays_put(row) if to_trash else ""),
             "note": row["note"], "recent": row["recent"], "safe": row["safe"] or row["group"] in SAFE_GROUPS,
             "trash": row["trash"], "action": "git gc" if row["git"] else "", "rank": row["rank"],
-            "weighs": row["weighs"]}
+            "weighs": row["weighs"], "bundle": row["bundle"]["key"] if row["bundle"] else "", "inside": row["inside"],
+            "when": row["when"]}
 
 
 # --- rows you asked never to see again, and what has gone ---------------------------------------
@@ -2372,11 +2374,20 @@ def scan_once(source):
         row["partly"] = bool(PARTLY.intersection(row["paths"]))
         if row["partly"]:
             row["note"] = f"{row['note']} At least this much: part of it could not be measured.".strip()
-    rows = [r for r in rows if r["kb"] >= MIN_KB or r["blocked"] or r["tidy"] or r["partly"]]
+    # A row under 1 MB is not worth a line, unless it is one of a bundle that is: a month of
+    # screenshots is mostly files smaller than that.
+    together = collections.Counter()
+    for row in rows:
+        if row["bundle"]:
+            together[row["bundle"]["key"]] += row["kb"]
+    rows = [r for r in rows if r["kb"] >= MIN_KB or r["blocked"] or r["tidy"] or r["partly"]
+            or (r["bundle"] and together[r["bundle"]["key"]] >= MIN_KB)]
     with LOCK:
         FOUND[source] = {r["id"]: r for r in rows}
     running, to_trash = processes(), settings()["trash"]
-    result = {"items": [public(r, running, to_trash) for r in rows], "notice": notice}
+    # What the page needs to draw a bundle's one line, once for the bundle and not on every row.
+    bundles = {r["bundle"]["key"]: {k: r["bundle"][k] for k in ("noun", "detail", "note", "min")} for r in rows if r["bundle"]}
+    result = {"items": [public(r, running, to_trash) for r in rows], "notice": notice, "bundles": bundles}
     with STATE_LOCK:
         last = load_state("last-scan.json", {})
         last[source] = {"at": time.time(), **result}
@@ -2412,7 +2423,8 @@ def saved_sizes(today):
 def keep_sizes(source, rows, when=None, failed=False):
     """Remember what a scan of one source measured, for "What grew". One snapshot a day: a later
     scan the same day replaces it, and days over 30 days old are dropped, so the file stays small.
-    A row is kept under what stays the same about it (`same`, else its id). A row the scan could
+    A row is kept under what stays the same about it (`same`, else its id), and the rows of a
+    bundle as one entry: their sizes added up, under the bundle's key. A row the scan could
     not measure (Docker was off, say) is kept without a size, and a source whose scan `failed`
     without any: an unknown must not read as 0 and then as growth a week later."""
     when = clock() if when is None else when
@@ -2420,8 +2432,18 @@ def keep_sizes(source, rows, when=None, failed=False):
     with STATE_LOCK:
         days = saved_sizes(max(day, day_of(clock())))
         today = days[day] if isinstance(days.get(day), dict) else {}
-        today[source] = None if failed else {
-            r["same"] or r["id"]: [r["group"], r["name"], None if r["blocked"] or r.get("partly") else r["kb"]] for r in rows}
+        entries = {}
+        for r in rows:
+            if r["bundle"]:
+                # A bundle is kept as one thing under its own key: its files come and go, and three
+                # thousand screenshots a day for a month would be a file of megabytes.
+                entry = entries.setdefault(r["bundle"]["key"], [r["group"], r["name"], 0, 0])
+                entry[2], entry[3] = entry[2] + r["kb"], entry[3] + 1
+                if entry[3] == 2:
+                    entry[1] = r["bundle"]["noun"][:1].upper() + r["bundle"]["noun"][1:]
+            else:
+                entries[r["same"] or r["id"]] = [r["group"], r["name"], None if r["blocked"] or r.get("partly") else r["kb"]]
+        today[source] = None if failed else {key: entry[:3] for key, entry in entries.items()}
         days[day] = today
         save_state("sizes.json", {d: sources for d, sources in days.items() if d >= oldest})
 
@@ -2542,21 +2564,59 @@ def removal_error(stderr, stuck):
     return first_line(stderr) or "Some files could not be removed."
 
 
-def delete(row, to_trash=False):
-    """Clear one row. With `to_trash` (the switch in Maintenance) its paths go to the Trash through
-    Finder and nothing is removed for good: no `rm`, and no row that only a command can clear."""
-    why = blocked(row, processes()) or (stays_put(row) if to_trash else "")
-    if why:
-        return {"freed_kb": 0, "left_kb": row["kb"], "errors": [why], "note": ""}
-    errors, said, note = [], None, ""
-    store = os.path.join(row["git"], ".git") if row["git"] else None
-    before = sum(du([store]).values()) if store else 0
+def refusal(row, to_trash):
+    """Why a row can't be cleared right now: an app that must be quit first, a repository in the
+    middle of something, or (with the switch on) a row that can't go to the Trash. '' when it can."""
+    return blocked(row, processes() if row["quit"] else "") or (stays_put(row) if to_trash else "")
+
+
+def trash_plan(row, to_trash):
+    """For a row on its way to the Trash: (why some of it stays, the paths to hand to Finder).
+    Every check is made here, path by path, before Finder hears of any of them."""
+    errors, going = [], []
     busy = clones_in_use(row["paths"])      # asked again now: a browser may have started since the scan
     if busy:
         errors.append(f"{count(len(busy), 'copy is', 'copies are')} in use by a running browser, so "
                       f"{'it' if len(busy) == 1 else 'they'} stayed.")
-    paths = [path for path in row["paths"] if path not in busy]
+    for path in row["paths"]:
+        if path in busy:
+            continue
+        seen = row["seen"].get(path)
+        try:
+            kind = stat.S_IFMT(os.lstat(path).st_mode)
+        except OSError:
+            kind = None
+        if seen is not None and kind != seen:
+            # One of your own files: only the very thing the scan looked at goes.
+            errors.append(f"Left alone, it is not what the scan found there any more: {tilde(path)}")
+        elif kind == stat.S_IFLNK and not row["trash"]:
+            pass        # a link among cache folders: Finder would move what it points at, so it just stays
+        elif not trashable(path):
+            errors.append(f"Left alone, it is outside the folders this tool clears: {tilde(path)}")
+        else:
+            going.append(path)
+    return errors, going
+
+
+def settle(row, errors, left=None):
+    """What a row comes to once its paths were dealt with: what is left of it, and so what went."""
+    if left is None:
+        left = sum(du(row["paths"]).values()) if row["paths"] else (row["kb"] if errors else 0)
+    freed = max(row["kb"] - left, 0)
+    row["kb"] = left
+    return {"freed_kb": freed, "left_kb": left, "errors": list(dict.fromkeys(errors))[:3], "note": ""}
+
+
+def delete(row, to_trash=False):
+    """Clear one row. With `to_trash` (the switch in Maintenance) its paths go to the Trash through
+    Finder and nothing is removed for good: no `rm`, and no row that only a command can clear."""
+    why = refusal(row, to_trash)
+    if why:
+        return {"freed_kb": 0, "left_kb": row["kb"], "errors": [why], "note": ""}
     if row["cmd"]:
+        errors, said, note = [], None, ""
+        store = os.path.join(row["git"], ".git") if row["git"] else None
+        before = sum(du([store]).values()) if store else 0
         try:
             done = run(row["cmd"], timeout=3600)
             if done.returncode:
@@ -2564,23 +2624,15 @@ def delete(row, to_trash=False):
             said = re.search(r"Total[^\n]*?([\d.]+\s*[kMGT]?B)", done.stdout)
         except (OSError, subprocess.TimeoutExpired):
             errors.append("The clean-up command did not finish.")
-    elif row["trash"] or to_trash:
-        going = []
-        for path in paths:
-            seen = row["seen"].get(path)
-            try:
-                kind = stat.S_IFMT(os.lstat(path).st_mode)
-            except OSError:
-                kind = None
-            if seen is not None and kind != seen:
-                # One of your own files: only the very thing the scan looked at goes.
-                errors.append(f"Left alone, it is not what the scan found there any more: {tilde(path)}")
-            elif kind == stat.S_IFLNK and not row["trash"]:
-                pass        # a link among cache folders: Finder would move what it points at, so it just stays
-            elif not trashable(path):
-                errors.append(f"Left alone, it is outside the folders this tool clears: {tilde(path)}")
-            else:
-                going.append(path)
+        result = settle(row, errors)
+        if said:
+            result["freed_kb"] = size_kb(said.group(1))
+        if store:
+            after = sum(du([store]).values())
+            result["freed_kb"], result["note"] = max(before - after, 0), f".git was {size_text(before)} and is {size_text(after)} now."
+        return result
+    if row["trash"] or to_trash:
+        errors, going = trash_plan(row, to_trash)
         for start in range(0, len(going), TRASH_BATCH):
             if start and JOB["stopping"]:       # asked before the next batch, never after the last one
                 errors.append("Stopped before all of it was moved.")
@@ -2589,28 +2641,25 @@ def delete(row, to_trash=False):
             errors += whys
             if NO_FINDER in whys or NOT_ALLOWED in whys:
                 break       # the rest of the row would only hear the same
-    else:
-        allowed = []
-        for path in paths:
-            if deletable(path):
-                allowed.append(path)
-            else:
-                errors.append(f"Left alone, it is outside the folders this tool clears: {tilde(path)}")
-        for start in range(0, len(allowed), 200):     # a row can hold hundreds of small files
-            batch = allowed[start:start + 200]
-            done = run(["/bin/rm", "-rf", "--"] + batch)
-            if done.returncode:
-                errors.append(removal_error(done.stderr, [p for p in batch if os.path.lexists(p)]))
-    if row["paths"]:
-        left = sum(du(row["paths"]).values())
-    else:
-        left = row["kb"] if errors else 0
-    freed = size_kb(said.group(1)) if said else max(row["kb"] - left, 0)
-    if store:
-        after = sum(du([store]).values())
-        freed, note = max(before - after, 0), f".git was {size_text(before)} and is {size_text(after)} now."
-    row["kb"] = left
-    return {"freed_kb": freed, "left_kb": left, "errors": list(dict.fromkeys(errors))[:3], "note": note}
+        return settle(row, errors)
+    errors, allowed = [], []
+    busy = clones_in_use(row["paths"])      # asked again now: a browser may have started since the scan
+    if busy:
+        errors.append(f"{count(len(busy), 'copy is', 'copies are')} in use by a running browser, so "
+                      f"{'it' if len(busy) == 1 else 'they'} stayed.")
+    for path in row["paths"]:
+        if path in busy:
+            continue
+        if deletable(path):
+            allowed.append(path)
+        else:
+            errors.append(f"Left alone, it is outside the folders this tool clears: {tilde(path)}")
+    for start in range(0, len(allowed), 200):     # a row can hold hundreds of small files
+        batch = allowed[start:start + 200]
+        done = run(["/bin/rm", "-rf", "--"] + batch)
+        if done.returncode:
+            errors.append(removal_error(done.stderr, [p for p in batch if os.path.lexists(p)]))
+    return settle(row, errors)
 
 
 def disk():
@@ -2634,31 +2683,90 @@ def watch_item(size, before, finished):
 
 
 def run_job(rows, to_trash=False):
-    for index, row in enumerate(rows):
-        if JOB["stopping"]:
-            break
-        size = row["kb"]
-        JOB.update(index=index, item_kb=0, current={"id": row["id"], "name": row["name"], "kb": size})
-        finished = threading.Event()
-        threading.Thread(target=watch_item, args=(size, free_kb(), finished), daemon=True).start()
-        try:
-            result = delete(row, to_trash)
-        except OSError as error:
-            result = {"freed_kb": 0, "left_kb": size, "errors": [sentence(error.strerror or error)], "note": ""}
-        finished.set()
+    """Clear the rows one after another. Rows on their way to the Trash don't each get a call to
+    Finder: up to a hundred paths wait together and go in one, and every row still gets its own
+    result. Stop is honoured between such calls: rows that were waiting stay as they were."""
+    waiting, bundled = [], {}       # (index, row, its size, why some of it stays, paths for Finder); bundle -> results
+
+    def done(row, size, result):
         errors = result["errors"]
         trashed = bool(row["trash"] or to_trash)
         outcome = "failed" if errors and not result["freed_kb"] else "partly" if errors else (
             "compacted" if row["git"] else "trashed" if trashed else "deleted")
-        # A git command is kept the short way: its real line is three settings and two paths long.
-        command = ["git", "-C", tilde(row["git"]), "gc"] if row["git"] else row["cmd"]
-        remember(row["name"], row["group"], row["paths"], result["freed_kb"], outcome,
-                 errors[0] if errors else "", command, result["note"])
+        if row["bundle"]:
+            bundled.setdefault(row["bundle"]["key"], []).append((row, result, outcome))     # one history line for them all
+        else:
+            # A git command is kept the short way: its real line is three settings and two paths long.
+            command = ["git", "-C", tilde(row["git"]), "gc"] if row["git"] else row["cmd"]
+            remember(row["name"], row["group"], row["paths"], result["freed_kb"], outcome,
+                     errors[0] if errors else "", command, result["note"])
         JOB["results"].append({"id": row["id"], "name": row["name"], "trashed": trashed, **result})
         JOB.update(done_kb=JOB["done_kb"] + size, item_kb=0)
+
+    def hand_over():
+        if not waiting:
+            return
+        index, first = waiting[0][0], waiting[0][1]
+        JOB.update(index=index, item_kb=0, current={"id": first["id"], "name": first["name"], "kb": waiting[0][2]})
+        whys = finder_trash_many([path for *_, going in waiting for path in going])
+        left = du([path for _, row, *_ in waiting for path in row["paths"]])        # one measuring for all of them
+        for index, row, size, errors, going in waiting:
+            JOB.update(index=index, current={"id": row["id"], "name": row["name"], "kb": size})
+            # Each row hears about its own paths and no other's: Finder's answers are kept by path.
+            done(row, size, settle(row, errors + [whys[path] for path in going if whys[path]],
+                                   sum(left.get(path, 0) for path in row["paths"])))
+        waiting.clear()
+
+    try:
+        for index, row in enumerate(rows):
+            if JOB["stopping"]:
+                break
+            size = row["kb"]
+            if not row["cmd"] and (row["trash"] or to_trash) and not refusal(row, to_trash):
+                errors, going = trash_plan(row, to_trash)
+                if len(going) <= TRASH_BATCH:
+                    if sum(len(g) for *_, g in waiting) + len(going) > TRASH_BATCH:
+                        hand_over()
+                    # A Stop asked for during that call is seen at the top of the next round, and
+                    # at the end: a row that waits is only ever handed over while nobody said stop.
+                    waiting.append((index, row, size, errors, going))
+                    continue
+            hand_over()         # in the order they were picked
+            if JOB["stopping"]:
+                break
+            JOB.update(index=index, item_kb=0, current={"id": row["id"], "name": row["name"], "kb": size})
+            finished = threading.Event()
+            threading.Thread(target=watch_item, args=(size, free_kb(), finished), daemon=True).start()
+            try:
+                result = delete(row, to_trash)
+            except OSError as error:
+                result = {"freed_kb": 0, "left_kb": size, "errors": [sentence(error.strerror or error)], "note": ""}
+            finished.set()
+            done(row, size, result)
+        if not JOB["stopping"]:
+            hand_over()
+    finally:
+        remember_bundles(bundled)
     forget_last({r["id"] for r in JOB["results"] if r["left_kb"] < MIN_KB})
     keep_found({r["id"] for r in JOB["results"]})
     JOB.update(running=False, current=None)
+
+
+def remember_bundles(bundled):
+    """The history line for the rows of a bundle that a job dealt with: one for all of them
+    ("37 files named … in runs"), not one a file. A single row of a bundle is said by its own name."""
+    for members in bundled.values():
+        row, result, outcome = members[0]
+        outcomes = {how for _, _, how in members}
+        stayed = [m for m in members if m[1]["errors"]]
+        if len(outcomes) > 1 or outcome == "partly":
+            outcome = "partly"          # some of them went, or some of each
+        why = stayed[0][1]["errors"][0] if stayed else ""
+        if len(stayed) > 1:
+            why = f"{len(stayed)} of them stayed. {why}"
+        what = row["name"] if len(members) == 1 else f"{len(members)} {row['bundle']['noun']}"
+        remember(what, row["group"], [path for member, _, _ in members for path in member["paths"]],
+                 sum(r["freed_kb"] for _, r, _ in members), outcome, why)
 
 
 # --- moving things to the Trash ------------------------------------------------------------------
@@ -2715,6 +2823,18 @@ def finder_trash_many(paths):
 def finder_trash(path):
     """Move one file or folder to the Trash through Finder. '' when it went, else why not."""
     return finder_trash_many([path])[path]
+
+
+def reveal_target(row, whole):
+    """What "Show in Finder" may show for a row of the last scan: the row's own (first) path, or
+    with `whole` the folder its bundle shares. Looked at again now: still there, inside the home
+    folder and not reached through a link. None when there is nothing headroom would show."""
+    if whole:
+        folder = row["bundle"]["folder"] if row["bundle"] else ""
+        inside = folder == HOME or folder.startswith(HOME + os.sep)
+        return folder if inside and os.path.isdir(folder) and os.path.realpath(folder) == folder else None
+    path = row["paths"][0] if row["paths"] else ""
+    return path if path and os.path.lexists(path) and deletable(path) else None
 
 
 def in_applications(path):
@@ -3915,9 +4035,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, done) if done else self.reply(404, {"error": "List the apps again."})
         if self.path == "/api/reveal":
             target = PLACES.get(wanted)
-            if not target:
-                return self.reply(404, {"error": "List this folder again."})
-            run(["/usr/bin/open", "-R", target["path"]])
+            if target:
+                run(["/usr/bin/open", "-R", target["path"]])
+                return self.reply(200, {})
+            # Or a row of the Clean list, by its id: its file, or the folder its bundle shares.
+            with LOCK:
+                row = next((found[wanted] for found in FOUND.values() if wanted in found), None)
+            whole = data.get("bundle") is True
+            path = reveal_target(row, whole) if row else None
+            if not path:
+                return self.reply(404, {"error": "That isn't in the last scan any more. Scan again."})
+            run(["/usr/bin/open", path] if whole else ["/usr/bin/open", "-R", path])
             return self.reply(200, {})
         if self.path == "/api/trash":
             why = explorer_trash(wanted)
