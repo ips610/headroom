@@ -36,6 +36,25 @@ Only the latest release. If you're on an older one, update first: the fix will b
 - In a git repository it only runs `git gc`, and not while a rebase or merge is half done. Every
   git call is made so that git runs nothing the repository names: no hooks, no file-system
   monitor, no fetching. A repository that sets its own program for gc is left alone.
+- Local copies of iCloud Drive files are off until you switch them on under Maintenance. While
+  off, iCloud Drive isn't scanned, and the app refuses to remove a copy even if asked by a row's
+  id. Settings that can't be read count as off.
+- With it on, the local copy of an iCloud Drive file is removed by macOS itself, a file at a
+  time, never with `rm` and never through the Trash. headroom's helper only names a file macOS
+  says is uploaded, the newest version, not syncing, not paused, without a conflict or an upload
+  error, and unchanged for the last hour. Where macOS gives no answer, the copy stays. It asks
+  all of that again right before, and refuses anything outside iCloud Drive, reached through a
+  symlink, hidden or inside a package. Offline, it offers nothing. The app checks the last hour
+  itself too, so an old listing can't take a file that changed since.
+- Only a plain yes from Finder or from that helper counts as freed. If macOS says yes and the
+  room isn't back yet, the result says it asked and gives no size.
+- A scan never opens a file that is only in iCloud, since opening it would download it.
+- Mail and Messages attachments only go to the Trash. Ticking the section never picks a Messages
+  attachment, and the database of your conversations is never opened.
+- Time Machine's local snapshots are removed by `tmutil`, by date. The page can't name one:
+  headroom removes the ones it listed, and a date is digits and hyphens before it gets near a
+  command. `tmutil` removes a date's snapshots on every mounted disk, and the page says so. The
+  password dialog only comes up when `tmutil` says root is required.
 - If its settings file can't be read, it refuses to delete instead of guessing whether cleaned
   files were meant for the Trash.
 - Tasks that need an administrator go through macOS's own password dialog. headroom never sees

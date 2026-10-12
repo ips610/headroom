@@ -60,7 +60,7 @@ RUN = secrets.token_hex(8)
 NONCE = secrets.token_urlsafe(16)
 
 # install.py and package.sh read the version from here. A newer release on GitHub shows up in the app.
-VERSION = "1.7.1"
+VERSION = "1.8"
 RELEASES = "https://github.com/ips610/headroom/releases"
 
 APPLICATIONS = "/Applications"
@@ -83,6 +83,10 @@ MODEL_RECENT = 30 * DAY    # a model used this recently: ticking the whole secti
 ARCHIVE_MIN_KB = 20 * 1000 * 1000 // 1024    # nor archives under 20 MB
 PACKED_MIN_KB = 100 * 1000 * 1000 // 1024    # a plain .gz, .bz2 or .xz is often one data file: only at 100 MB
 MANY = 5                   # more archives in one folder, or model files of one name, than this fold into one line
+CLOUD_MIN_KB = 10 * 1000 * 1000 // 1024      # local copies of iCloud Drive files under 10 MB aren't listed
+CLOUD_RECENT = 30 * DAY    # one opened or changed this recently: ticking the whole section leaves it out
+CLOUD_QUIET = 60 * 60      # one changed in the last hour is never offered: iCloud may not have the newest edit yet
+MESSAGE_MIN_KB = 20 * 1000 * 1000 // 1024    # nor Messages attachments under 20 MB
 SAFE_GROUPS = ("apps", "temp")   # what "Safe clean" ticks, with installers older than a month
 
 # Folder names worth a plainer label, and the section they belong in.
@@ -232,22 +236,31 @@ def children(folder, skip=()):
     return [os.path.join(folder, n) for n in sorted(names) if n not in skip and n != ".DS_Store"]
 
 
-def find_sizer():
-    """The app's own folder measurer (launcher/size.swift), which prints what `du -sk` prints many
-    times faster. It sits beside the launcher in the app; HEADROOM_SIZE points at one built
-    elsewhere. None from ./run.sh or an app built without a Swift compiler: then du measures."""
+def find_helper(name, variable):
+    """One of the small programs that come with the app, beside its launcher. The environment
+    variable points at one built elsewhere. None from ./run.sh or an app built without a Swift
+    compiler."""
     # Only inside an app bundle (…/Contents/Resources or Frameworks): from a plain folder there is
     # no telling what a MacOS folder next door holds.
     in_app = os.path.basename(os.path.dirname(HERE)) == "Contents"
-    beside = [os.path.join(HERE, "..", "MacOS", "headroom-size")] if in_app else []
-    beside += [os.path.join(os.path.dirname(sys.executable), "headroom-size")] if FROZEN else []
-    for candidate in [os.environ.get("HEADROOM_SIZE", "")] + beside:
+    beside = [os.path.join(HERE, "..", "MacOS", name)] if in_app else []
+    beside += [os.path.join(os.path.dirname(sys.executable), name)] if FROZEN else []
+    for candidate in [os.environ.get(variable, "")] + beside:
         if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return os.path.realpath(candidate)
     return None
 
 
+def find_sizer():
+    """The app's own folder measurer (launcher/size.swift), which prints what `du -sk` prints many
+    times faster. HEADROOM_SIZE points at one built elsewhere. Without it, du measures."""
+    return find_helper("headroom-size", "HEADROOM_SIZE")
+
+
 SIZER = find_sizer()
+# launcher/cloud.swift: asks macOS about iCloud Drive files, and removes a file's local copy the
+# way macOS means it to be done. Without it the iCloud section offers nothing.
+CLOUD = find_helper("headroom-cloud", "HEADROOM_CLOUD")
 
 
 def measured_lines(output, asked):
@@ -332,6 +345,7 @@ def item(group, name, paths, kb, detail="", cmd=None, quit=None, blocked=""):
         # one of these, and the page folds them into a line that opens: {key, noun, detail, note,
         # folder, min}. Each is still a row of its own, picked and cleared by its own id.
         "bundle": None,
+        "evict": False,      # an iCloud Drive file: only its copy on this Mac goes, by neither rm nor the Trash
         "inside": "",        # what the row is called inside its bundle: its path from the shared folder
         "when": 0,           # when it was added or changed, for sorting
     }
@@ -1061,7 +1075,7 @@ def git_tracked(folders):
     tracked, unchecked = set(), set()
     program = git() if repos else None
     for root, inside in repos.items():
-        if not program:
+        if not program or git_in_icloud(root):
             unchecked.update(inside)
             continue
         relative = [os.path.relpath(f, root) for f in inside]
@@ -1079,6 +1093,18 @@ def git_tracked(folders):
             if any(name.startswith(prefix) for name in listed):
                 tracked.add(folder)
     return tracked, unchecked
+
+
+def git_in_icloud(root):
+    """True when a file git reads first in this repository is only in iCloud: asking git anything
+    would download it."""
+    for name in ("config", "HEAD", "index"):
+        try:
+            if dataless(os.lstat(os.path.join(root, ".git", name))):
+                return True
+        except OSError:
+            pass
+    return False
 
 
 GC_KEEPS = "Commits you can reach stay; git may remove unreachable ones older than its grace period."
@@ -1111,6 +1137,8 @@ def git_busy(root):
     for _, folders, names in os.walk(os.path.join(store, "refs")):
         if any(name.endswith(".lock") for name in folders + names):
             return "Git is at work in this repository (it holds a lock). Try again when it's done."
+    if git_in_icloud(root):
+        return "Part of its .git folder is only in iCloud, so headroom leaves it alone."
     # Reading the settings runs nothing. A program the repository names for gc would run, and a
     # partial clone could go to the network for what it lacks: neither is for headroom to start.
     program = git()
@@ -1277,8 +1305,11 @@ def scan_trash():
 # --- installer files -----------------------------------------------------------------------------
 
 def zipped_installer(path):
-    """A zip with an app or an installer inside, read from its table of contents, not unpacked."""
+    """A zip with an app or an installer inside, read from its table of contents, not unpacked.
+    Never one that is only in iCloud: opening it would download it."""
     try:
+        if dataless(os.lstat(path)):
+            return False
         with zipfile.ZipFile(path) as archive:
             return any(re.search(r"\.app/|\.(pkg|mpkg|dmg)$", n, re.I) for n in archive.namelist())
     except (OSError, zipfile.BadZipFile, EOFError, ValueError, NotImplementedError):
@@ -1654,6 +1685,238 @@ def scan_archives():
     return rows, ""
 
 
+# --- local copies of iCloud Drive files ----------------------------------------------------------------
+
+CLOUD_ROOTS = []        # the iCloud folders the last listing named: the only places a local copy is removed from
+CLOUD_STAYS = "They stay in iCloud and download again when you open them."
+
+
+def cloud_folders():
+    """The only folders that can be iCloud's: iCloud Drive itself, and Desktop and Documents."""
+    return [home("Library", "Mobile Documents", "com~apple~CloudDocs"), home("Desktop"), home("Documents")]
+
+
+def cloud_name(path):
+    """A path inside iCloud Drive as Finder calls it: iCloud Drive/Projects, not the folder's real name."""
+    drive = cloud_folders()[0]
+    return "iCloud Drive" + path[len(drive):] if path == drive or path.startswith(drive + os.sep) else tilde(path)
+
+
+def cloud_listing():
+    """What the app's iCloud helper says: {drive, online, account, roots, files: [{path, bytes, used}]}.
+    None when there is no helper here, it did not answer, or what it said isn't that."""
+    if not CLOUD:
+        return None
+    try:
+        done = run([CLOUD, "list", str(CLOUD_MIN_KB * 1024)], timeout=300)
+        said = json.loads(done.stdout) if done.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if not isinstance(said, dict) or not isinstance(said.get("roots"), list) or not isinstance(said.get("files"), list):
+        return None
+    return said
+
+
+def scan_cloud():
+    """Files in iCloud Drive that also take up room on this Mac: 10 MB or more, uploaded in full
+    and not changing. Removing the local copy frees the room; the file stays in iCloud and comes
+    down again when it is opened. Nothing is deleted. The helper decides what is safe to name, and
+    every path it names is looked at again here: only in iCloud's own folders, never by way of a
+    link, and never a file another section already offers."""
+    # Off unless switched on under Maintenance: then nothing is asked, listed or remembered.
+    rows, notice, roots = cloud_rows() if settings()["cloud"] else ([], "", [])
+    CLOUD_ROOTS[:] = roots      # what the rows of this scan may be removed from, and nothing older
+    return rows, notice
+
+
+def settled(info):
+    """True when neither a file's contents nor anything else about it changed in the last hour.
+    "Uploaded" only says iCloud has data for the file, not that it has the newest edit, so a file
+    that changed a moment ago keeps its copy. The helper asks the same of macOS."""
+    return max(info.st_mtime, info.st_ctime) < clock() - CLOUD_QUIET
+
+
+def cloud_rows():
+    if not CLOUD:
+        return [], ("Removing local copies needs the small helper that comes with the headroom app. From source, "
+                    "build it with launcher/build.sh and point HEADROOM_CLOUD at it."), []
+    said = cloud_listing()
+    if said is None:
+        return [], Unsure("headroom's iCloud helper did not answer. Scan again in a minute."), []
+    if not said.get("drive"):
+        return [], "iCloud Drive isn't set up on this Mac, so there are no local copies to remove.", []
+    if not said.get("online"):
+        return [], Unsure("This Mac is offline. A local copy that goes could not come back until it is online "
+                          "again, so nothing is offered now."), []
+    roots = [root for root in said["roots"] if isinstance(root, str) and root in cloud_folders()
+             and os.path.isdir(root) and os.path.realpath(root) == root]
+    found = []
+    for entry in said["files"]:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if not isinstance(path, str) or os.path.normpath(path) != path or not deletable(path) \
+                or not any(path.startswith(root + os.sep) for root in roots):
+            continue
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        parts = path[len(HOME) + 1:].split(os.sep)
+        hidden = any(part.startswith(".") for part in parts) or any(part.lower().endswith(PACKAGES + MODEL_PACKAGES) for part in parts[:-1])
+        kb = info.st_blocks * 512 // 1024       # measured here: what the helper says is only a hint
+        if stat.S_ISREG(info.st_mode) and not dataless(info) and not hidden and kb >= CLOUD_MIN_KB and settled(info):
+            found.append((path, kb, max(info.st_mtime, info.st_atime, getattr(info, "st_birthtime", 0)), info))
+    # A path is in one row only. Desktop and Documents are other sections' ground too: an archive,
+    # a model file, an installer or a project's build folder there is theirs, and so is a
+    # screenshot or screen recording wherever macOS saves those.
+    drive, theirs = cloud_folders()[0], set()
+    shared = [path for path, *_ in found if not path.startswith(drive + os.sep)]
+    kept = {path for path, _ in loose(shared)} if shared else set()
+    theirs.update(path for path in shared if path not in kept or path.lower().endswith(
+        ARCHIVE_TYPES + PACKED_TYPES + MODEL_TYPES + MODEL_MAYBE + INSTALLERS))
+    shots = [path for path, *_ in found if path.lower().endswith(SHOT_TYPES + CLIP_TYPES)]
+    folder = capture_folder() if shots else ""
+    shots = [path for path in shots if os.path.dirname(path) == folder]
+    if shots:
+        flagged, named = flagged_captures(shots)[0], capture_names()
+        theirs.update(path for path in shots if path in flagged or named.fullmatch(os.path.splitext(os.path.basename(path))[0]))
+    rows, folders = [], {}
+    for path, kb, used, info in found:
+        if path in theirs:
+            continue
+        folder = os.path.dirname(path)
+        row = item("cloud", f"{os.path.basename(folder)} / {os.path.basename(path)}", [path], kb,
+                   f"{cloud_name(folder)} · opened or changed {ago(used)}")
+        row["evict"], row["seen"], row["when"], row["inside"] = True, {path: stat.S_IFMT(info.st_mode)}, int(used), os.path.basename(path)
+        row["recent"] = used > time.time() - CLOUD_RECENT
+        row["note"] = ("Opened or changed in the last 30 days, so ticking the whole section leaves it out. " if row["recent"] else "") \
+            + "Only the copy on this Mac goes. The file stays in iCloud."
+        row["bundle"] = folders.setdefault(folder, {
+            "key": "cloud:" + hashlib.sha1(folder.encode()).hexdigest()[:12], "noun": f"files in {os.path.basename(folder)}",
+            "detail": cloud_name(folder), "note": CLOUD_STAYS, "left": "opened or changed in the last 30 days",
+            "folder": folder, "min": 1})
+        rows.append(row)
+    if not rows and said.get("account") is False:
+        return [], "macOS says nobody is signed in to iCloud Drive on this Mac, so there are no local copies to remove.", roots
+    return rows, "", roots
+
+
+def cloud_evict_many(paths):
+    """Remove the local copies of iCloud Drive files, through the app's helper: {path: '' when the
+    copy went, else why it stayed}. The helper asks macOS about each file again right before, and
+    macOS does the removing. A call that fails as a whole says so for every path."""
+    gone = "headroom's iCloud helper did not answer, so the copy stayed."
+    if not paths:
+        return {}
+    try:
+        done = run([CLOUD, "evict", "--"] + list(paths), timeout=900) if CLOUD else None
+        said = json.loads(done.stdout) if done and done.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        said = None
+    whys = dict.fromkeys(paths, gone)
+    for answer in said if isinstance(said, list) else ():
+        # Only what was asked about, and only a plain yes counts as gone. Anything else the
+        # helper says (a path that is not a string, say) is no answer at all.
+        if isinstance(answer, dict) and isinstance(answer.get("path"), str) and answer["path"] in whys:
+            whys[answer["path"]] = "" if answer.get("ok") is True else sentence(str(answer.get("why") or "macOS kept the copy"))
+    return whys
+
+
+def evict_plan(row):
+    """For a row of iCloud files: (why some stay, the paths to hand to the helper). Only with the
+    switch under Maintenance on, and only a plain file the scan saw, in a folder the last listing
+    named as iCloud's, not reached through a link and not changed in the last hour: the listing
+    may be old by now."""
+    if not settings()["cloud"]:         # also when the settings can't be read: off
+        return ["Left alone: local copies of iCloud Drive files are switched off under Maintenance."], []
+    errors, going = [], []
+    for path in row["paths"]:
+        try:
+            info = os.lstat(path)
+            kind = stat.S_IFMT(info.st_mode)
+        except OSError:
+            info = kind = None
+        if kind != stat.S_IFREG or row["seen"].get(path) != kind:
+            errors.append(f"Left alone, it is not what the scan found there any more: {tilde(path)}")
+        elif not deletable(path) or not any(path.startswith(root + os.sep) for root in CLOUD_ROOTS):
+            errors.append(f"Left alone, it is outside iCloud Drive: {tilde(path)}")
+        elif not settled(info):
+            errors.append(f"Left alone, it changed in the last hour: {tilde(path)}")
+        else:
+            going.append(path)
+    return errors, going
+
+
+# --- Mail and Messages attachments ----------------------------------------------------------------------
+
+def messages_in_icloud():
+    """True when Messages in iCloud is on (macOS keeps that in the com.apple.madrid settings)."""
+    try:
+        done = run(["/usr/bin/defaults", "read", "com.apple.madrid", "CloudKitSyncingEnabled"], timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0 and done.stdout.strip() == "1"
+
+
+def scan_attachments():
+    """Copies Mail made of attachments you opened (the messages keep the originals), and the big
+    files inside Messages conversations (20 MB or more). Both are behind Full Disk Access, and both
+    go to the Trash. A Messages attachment is part of a conversation: removing it leaves a blank
+    spot there, so none of them is ever picked by ticking the section. chat.db is never read."""
+    shut, rows = [], []
+    mail = home("Library", "Containers", "com.apple.mail", "Data", "Library", "Mail Downloads")
+    theirs = set(find_installers())     # installers and zipped apps in there are Installer files' rows
+    copies = []
+    for entry in listing(mail, shut, "the copies Mail keeps of opened attachments"):
+        # Mail Downloads/<one folder an attachment>/<the file>
+        copies += children(entry) if os.path.isdir(entry) and not os.path.islink(entry) else [entry]
+    # Not a link, and not behind one: only what the Trash would take.
+    copies = [p for p in copies if p not in theirs and not p.lower().endswith(".torrent") and not os.path.islink(p) and deletable(p)]
+    sizes = du(copies)
+    downloads = {"key": "mail:downloads", "noun": "copies of attachments Mail opened", "detail": tilde(mail),
+                 "note": "The messages keep the originals.", "folder": mail, "min": 1}
+    for path in copies:
+        if path in sizes:
+            try:
+                info = os.lstat(path)       # once: a copy that goes missing meanwhile is just not listed
+            except OSError:
+                continue
+            made = getattr(info, "st_birthtime", info.st_mtime)
+            row = item("mail", os.path.basename(path), [path], sizes[path], f"A copy Mail made · added {ago(made)}")
+            row["trash"], row["when"], row["inside"], row["bundle"] = True, int(made), os.path.basename(path), downloads
+            row["seen"], row["rank"] = {path: stat.S_IFMT(info.st_mode)}, 999999      # Mail's copies first
+            rows.append(row)
+    attachments = home("Library", "Messages", "Attachments")
+    cloud = " With Messages in iCloud on, it may still be in iCloud." if messages_in_icloud() else ""
+    blank = "Removing it leaves a blank spot in its conversation in Messages on this Mac."
+    months = {}
+    for top in listing(attachments, shut, "your Messages attachments"):
+        for folder, _, names in os.walk(top) if os.path.isdir(top) and not os.path.islink(top) else ():
+            for name in names:
+                path = os.path.join(folder, name)
+                try:
+                    info = os.lstat(path)
+                except OSError:
+                    continue
+                kb = info.st_blocks * 512 // 1024
+                if not stat.S_ISREG(info.st_mode) or kb < MESSAGE_MIN_KB or dataless(info) or not deletable(path):
+                    continue
+                made = getattr(info, "st_birthtime", info.st_mtime)
+                month = time.strftime("%Y-%m", time.localtime(made))
+                row = item("mail", name, [path], kb, f"In a Messages conversation · added {ago(made)}")
+                row["trash"], row["when"], row["inside"] = True, int(made), name
+                row["seen"], row["rank"] = {path: stat.S_IFMT(info.st_mode)}, int(month.replace("-", ""))
+                # Never by ticking the section: each one, or each month of them, by hand.
+                row["recent"], row["note"] = True, f"{blank}{cloud} Tick it yourself: ticking the whole section leaves it out."
+                row["bundle"] = months.setdefault(month, {
+                    "key": "messages:" + month,
+                    "noun": f"Messages attachments from {time.strftime('%B %Y', time.strptime(month, '%Y-%m'))}",
+                    "detail": tilde(attachments),
+                    "note": f"Removing one leaves a blank spot in its conversation in Messages on this Mac.{cloud.replace(' it ', ' they ')}",
+                    "left": "each is part of a conversation", "folder": attachments, "min": 1})
+                rows.append(row)
+    return rows, full_disk_access(list(dict.fromkeys(shut))) if shut else ""
+
+
 # --- qBittorrent ---------------------------------------------------------------------------------
 
 QBIT = ("Quit qBittorrent first", [re.escape("/qBittorrent.app/Contents/MacOS/qbittorrent")])
@@ -1683,6 +1946,8 @@ def bdecode(data, at=0):
 
 def bfile(path):
     try:
+        if dataless(os.lstat(path)):        # only in iCloud: reading it would download it
+            return None
         with open(path, "rb") as handle:
             value = bdecode(handle.read())[0]
     except (OSError, ValueError, IndexError, RecursionError):
@@ -2153,6 +2418,8 @@ SOURCES = {
     "big": (("big",), scan_big),
     "models": (("models", "dev"), scan_models),
     "archives": (("archives",), scan_archives),
+    "attachments": (("mail",), scan_attachments),
+    "cloud": (("cloud",), scan_cloud),
     "dev_tools": (("dev",), scan_dev_tools),
     "simulators": (("dev", "big"), scan_simulators),
     "builds": (("builds", "dev"), scan_builds),     # and the big .git folders of the same projects
@@ -2161,7 +2428,7 @@ SOURCES = {
 
 # Sources that wait on another program, which can take its time (Homebrew's dry runs take about
 # 20 seconds): the page calls the scan finished without them and fills their rows in as they land.
-SLOW = {"homebrew": "Homebrew", "docker": "Docker", "simulators": "the simulators"}
+SLOW = {"homebrew": "Homebrew", "docker": "Docker", "simulators": "the simulators", "cloud": "iCloud Drive"}
 
 FOUND = {}   # source -> {id: row}. The only things a delete will touch.
 LOCK = threading.Lock()
@@ -2196,7 +2463,7 @@ def public(row, running, to_trash=False):
             "note": row["note"], "recent": row["recent"], "safe": row["safe"] or row["group"] in SAFE_GROUPS,
             "trash": row["trash"], "action": "git gc" if row["git"] else "", "rank": row["rank"],
             "weighs": row["weighs"], "bundle": row["bundle"]["key"] if row["bundle"] else "", "inside": row["inside"],
-            "when": row["when"]}
+            "when": row["when"], "evict": row["evict"]}
 
 
 # --- rows you asked never to see again, and what has gone ---------------------------------------
@@ -2386,7 +2653,8 @@ def scan_once(source):
         FOUND[source] = {r["id"]: r for r in rows}
     running, to_trash = processes(), settings()["trash"]
     # What the page needs to draw a bundle's one line, once for the bundle and not on every row.
-    bundles = {r["bundle"]["key"]: {k: r["bundle"][k] for k in ("noun", "detail", "note", "min")} for r in rows if r["bundle"]}
+    bundles = {r["bundle"]["key"]: {k: r["bundle"][k] for k in ("noun", "detail", "note", "min", "left") if k in r["bundle"]}
+               for r in rows if r["bundle"]}
     result = {"items": [public(r, running, to_trash) for r in rows], "notice": notice, "bundles": bundles}
     with STATE_LOCK:
         last = load_state("last-scan.json", {})
@@ -2398,7 +2666,7 @@ def scan_once(source):
 
 # --- what grew: the sizes each day's scan measured ------------------------------------------------
 
-clock = time.time       # what "now" is for the snapshots; the tests set it, so a made-up day isn't "the future"
+clock = time.time       # what "now" is for the day's sizes and for "changed in the last hour"; the tests move it
 
 
 def day_of(when):
@@ -2607,12 +2875,41 @@ def settle(row, errors, left=None):
     return {"freed_kb": freed, "left_kb": left, "errors": list(dict.fromkeys(errors))[:3], "note": ""}
 
 
+def handed_over(row, errors, going, whys, left):
+    """What a row comes to once its paths were handed to Finder or to the iCloud helper. `whys` is
+    what that said for each path ('' for a plain yes), `left` what is there now as {path: kb}, or
+    None when that could not be measured. Only a yes counts as freed: a path that was refused, or
+    never handed over, frees nothing here whatever became of it since. (A row with some of its
+    paths refused is measured as a whole.)"""
+    said = {path: whys.get(path, "It was not answered for.") for path in going}
+    went = [path for path in going if not said[path]]
+    whole = len(went) == len(row["paths"])
+    size = row["kb"]
+    result = settle(row, errors + [why for why in said.values() if why],
+                    (0 if whole else size) if left is None else sum(left.get(path, 0) for path in row["paths"]))
+    result["unmeasured"] = bool(went) and left is None      # it went; only its size can't be said
+    if not went or left is None:
+        result["freed_kb"] = 0
+    # macOS said yes and the room is not back yet (it may free it after the call returns): the
+    # row is done, and no size is claimed for it.
+    result["asked"] = bool(row["evict"] and whole and not result["errors"] and not result["freed_kb"])
+    if result["asked"]:
+        result["left_kb"] = row["kb"] = 0
+    return result
+
+
 def delete(row, to_trash=False):
     """Clear one row. With `to_trash` (the switch in Maintenance) its paths go to the Trash through
     Finder and nothing is removed for good: no `rm`, and no row that only a command can clear."""
     why = refusal(row, to_trash)
     if why:
         return {"freed_kb": 0, "left_kb": row["kb"], "errors": [why], "note": ""}
+    if row["evict"]:
+        # An iCloud Drive file: its copy on this Mac goes, through macOS. Never rm, never the Trash,
+        # whatever the switch says: either would delete the file from iCloud too.
+        errors, going = evict_plan(row)
+        whys = cloud_evict_many(going)
+        return handed_over(row, errors, going, whys, du(row["paths"]))
     if row["cmd"]:
         errors, said, note = [], None, ""
         store = os.path.join(row["git"], ".git") if row["git"] else None
@@ -2685,22 +2982,27 @@ def watch_item(size, before, finished):
 def run_job(rows, to_trash=False):
     """Clear the rows one after another. Rows on their way to the Trash don't each get a call to
     Finder: up to a hundred paths wait together and go in one, and every row still gets its own
-    result. Stop is honoured between such calls: rows that were waiting stay as they were."""
-    waiting, bundled = [], {}       # (index, row, its size, why some of it stays, paths for Finder); bundle -> results
+    result. iCloud files whose local copy goes wait together the same way, for the iCloud helper.
+    Stop is honoured between such calls: rows that were waiting stay as they were."""
+    waiting, bundled = [], {}       # (index, row, its size, why some of it stays, paths to hand over); bundle -> results
 
     def done(row, size, result):
         errors = result["errors"]
-        trashed = bool(row["trash"] or to_trash)
-        outcome = "failed" if errors and not result["freed_kb"] else "partly" if errors else (
-            "compacted" if row["git"] else "trashed" if trashed else "deleted")
+        # "asked": macOS agreed to remove an iCloud file's copy and no room has come back yet. That
+        # is not called removed, and no size is given for it.
+        asked, unmeasured = bool(result.get("asked")), bool(result.get("unmeasured"))
+        evicted = bool(row["evict"]) and not asked
+        trashed = not row["evict"] and bool(row["trash"] or to_trash)
+        outcome = "failed" if errors and not result["freed_kb"] and not unmeasured else "partly" if errors else (
+            "compacted" if row["git"] else "asked" if asked else "evicted" if evicted else "trashed" if trashed else "deleted")
         if row["bundle"]:
             bundled.setdefault(row["bundle"]["key"], []).append((row, result, outcome))     # one history line for them all
         else:
             # A git command is kept the short way: its real line is three settings and two paths long.
             command = ["git", "-C", tilde(row["git"]), "gc"] if row["git"] else row["cmd"]
-            remember(row["name"], row["group"], row["paths"], result["freed_kb"], outcome,
-                     errors[0] if errors else "", command, result["note"])
-        JOB["results"].append({"id": row["id"], "name": row["name"], "trashed": trashed, **result})
+            remember(row["name"], row["group"], row["paths"], result["freed_kb"], outcome, errors[0] if errors else "",
+                     command, result["note"] or ("What it freed could not be measured." if unmeasured and not asked else ""))
+        JOB["results"].append({"id": row["id"], "name": row["name"], "trashed": trashed, "evicted": evicted, **result})
         JOB.update(done_kb=JOB["done_kb"] + size, item_kb=0)
 
     def hand_over():
@@ -2708,13 +3010,17 @@ def run_job(rows, to_trash=False):
             return
         index, first = waiting[0][0], waiting[0][1]
         JOB.update(index=index, item_kb=0, current={"id": first["id"], "name": first["name"], "kb": waiting[0][2]})
-        whys = finder_trash_many([path for *_, going in waiting for path in going])
-        left = du([path for _, row, *_ in waiting for path in row["paths"]])        # one measuring for all of them
+        # All of one kind: Finder for the Trash, the helper for local copies of iCloud files.
+        hand = cloud_evict_many if first["evict"] else finder_trash_many
+        whys = hand([path for *_, going in waiting for path in going])
+        try:
+            left = du([path for _, row, *_ in waiting for path in row["paths"]])        # one measuring for all of them
+        except OSError:
+            left = None         # a Mac out of processes: what went has gone all the same, and is recorded
         for index, row, size, errors, going in waiting:
             JOB.update(index=index, current={"id": row["id"], "name": row["name"], "kb": size})
-            # Each row hears about its own paths and no other's: Finder's answers are kept by path.
-            done(row, size, settle(row, errors + [whys[path] for path in going if whys[path]],
-                                   sum(left.get(path, 0) for path in row["paths"])))
+            # Each row hears about its own paths and no other's: the answers are kept by path.
+            done(row, size, handed_over(row, errors, going, whys, left))
         waiting.clear()
 
     try:
@@ -2722,10 +3028,11 @@ def run_job(rows, to_trash=False):
             if JOB["stopping"]:
                 break
             size = row["kb"]
-            if not row["cmd"] and (row["trash"] or to_trash) and not refusal(row, to_trash):
-                errors, going = trash_plan(row, to_trash)
+            if (row["evict"] or (not row["cmd"] and (row["trash"] or to_trash))) and not refusal(row, to_trash):
+                errors, going = evict_plan(row) if row["evict"] else trash_plan(row, to_trash)
                 if len(going) <= TRASH_BATCH:
-                    if sum(len(g) for *_, g in waiting) + len(going) > TRASH_BATCH:
+                    if waiting and (waiting[0][1]["evict"] != row["evict"]
+                                    or sum(len(g) for *_, g in waiting) + len(going) > TRASH_BATCH):
                         hand_over()
                     # A Stop asked for during that call is seen at the top of the next round, and
                     # at the end: a row that waits is only ever handed over while nobody said stop.
@@ -2741,15 +3048,20 @@ def run_job(rows, to_trash=False):
                 result = delete(row, to_trash)
             except OSError as error:
                 result = {"freed_kb": 0, "left_kb": size, "errors": [sentence(error.strerror or error)], "note": ""}
-            finished.set()
+            finally:
+                finished.set()      # the watcher stops with the row, whatever became of it
             done(row, size, result)
         if not JOB["stopping"]:
             hand_over()
     finally:
-        remember_bundles(bundled)
-    forget_last({r["id"] for r in JOB["results"] if r["left_kb"] < MIN_KB})
-    keep_found({r["id"] for r in JOB["results"]})
-    JOB.update(running=False, current=None)
+        # Whatever went wrong above, the job ends: a job left "running" would turn every later
+        # delete away until headroom is restarted.
+        try:
+            remember_bundles(bundled)
+            forget_last({r["id"] for r in JOB["results"] if r["left_kb"] < MIN_KB})
+            keep_found({r["id"] for r in JOB["results"]})
+        finally:
+            JOB.update(running=False, current=None)
 
 
 def remember_bundles(bundled):
@@ -2758,9 +3070,10 @@ def remember_bundles(bundled):
     for members in bundled.values():
         row, result, outcome = members[0]
         outcomes = {how for _, _, how in members}
+        # A copy macOS has agreed to remove but not yet freed reads as the measured ones beside it do.
+        outcomes = outcomes - {"asked"} or outcomes
         stayed = [m for m in members if m[1]["errors"]]
-        if len(outcomes) > 1 or outcome == "partly":
-            outcome = "partly"          # some of them went, or some of each
+        outcome = "partly" if len(outcomes) > 1 or "partly" in outcomes else next(iter(outcomes))    # some went, or some of each
         why = stayed[0][1]["errors"][0] if stayed else ""
         if len(stayed) > 1:
             why = f"{len(stayed)} of them stayed. {why}"
@@ -3392,7 +3705,9 @@ def settings():
     gb = saved.get("alert_gb", 20)
     return {"alert": saved.get("alert", True) is not False, "weekly": saved.get("weekly", True) is not False,
             "alert_gb": gb if isinstance(gb, int) and 1 <= gb <= 1000 else 20,
-            "trash": saved.get("trash") is True}     # cleaned files go to the Trash, not straight off: off unless chosen
+            "trash": saved.get("trash") is True,     # cleaned files go to the Trash, not straight off: off unless chosen
+            # Local copies of iCloud Drive files are offered: off unless chosen, and off when this can't be read.
+            "cloud": saved.get("cloud") is True}
 
 
 def settings_broken():
@@ -3573,7 +3888,7 @@ def space_history():
         pass
     marks = []
     for entry in reversed(history(limit=3000)):
-        if entry.get("result") not in ("deleted", "trashed", "compacted", "partly") or not entry.get("kb"):
+        if entry.get("result") not in ("deleted", "trashed", "compacted", "evicted", "partly") or not entry.get("kb"):     # "asked" has no size
             continue
         try:
             when = datetime.datetime.fromisoformat(str(entry["at"])).timestamp()
@@ -3618,6 +3933,100 @@ def maintain(task):
                 return {"ok": False, "text": "Cancelled. Nothing changed."}
             return {"ok": False, "text": first_line(done.stderr) or "It did not work."}
     return {"ok": True, "text": success}
+
+
+# Time Machine keeps hourly snapshots of the startup disk on that disk itself for about a day, so a
+# file can be restored without the backup disk. They count as used space until macOS clears them,
+# which it does by itself when room runs short. Listing only reads. Removing asks tmutil, one
+# snapshot at a time, by its date: the dates of the last listing and no others, and every one of
+# them is digits and hyphens before it goes anywhere near a command. By date and not by disk, so
+# a snapshot made after the listing can't go with them. tmutil removes a date's snapshots on every
+# mounted disk, though, and only the startup disk is listed and counted here: the page says so.
+SNAPSHOT = re.compile(r"com\.apple\.TimeMachine\.([0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6})\.local")
+SNAPSHOT_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}")       # 0 to 9 only: \d would take any script's digits
+SNAPSHOTS = []          # the dates the page was last shown: the only snapshots a removal names
+# What tmutil prints when a command is for root only. Read from the strings inside /usr/bin/tmutil
+# ("%s: %s requires root privileges." and "Must be run as root."), not seen live. Nothing else
+# raises the password dialog: a snapshot that is busy stays, and tmutil's own words are shown.
+NEEDS_ADMIN = re.compile(r"requires root privileges|Must be run as root")
+
+
+def snapshot_time(date):
+    """When a snapshot was made, from its date (2026-10-11-093012, this Mac's own time); None when it isn't one."""
+    try:
+        return int(time.mktime(time.strptime(date, "%Y-%m-%d-%H%M%S"))) if SNAPSHOT_DATE.fullmatch(date) else None
+    except (ValueError, OverflowError):
+        return None
+
+
+def snapshot_dates():
+    """The dates of Time Machine's local snapshots of the startup disk, oldest first. None when
+    tmutil did not answer. Read-only: `tmutil listlocalsnapshots /`."""
+    try:
+        done = run(["/usr/bin/tmutil", "listlocalsnapshots", "/"], timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if done.returncode:
+        return None
+    found = (SNAPSHOT.fullmatch(line.strip()) for line in done.stdout.split("\n"))
+    return sorted({match.group(1) for match in found if match and snapshot_time(match.group(1)) is not None})
+
+
+def list_snapshots():
+    """For the Maintenance tab: how many there are and when the oldest was made. macOS doesn't say
+    how big they are to anyone but root, so no size."""
+    dates = snapshot_dates()
+    SNAPSHOTS[:] = dates or []
+    if dates is None:
+        return {"count": 0, "oldest": 0, "error": "Time Machine did not answer."}
+    return {"count": len(dates), "oldest": snapshot_time(dates[0]) if dates else 0, "error": ""}
+
+
+def remove_snapshots():
+    """Remove the local snapshots the page was last shown, if they are still there. tmutil is asked
+    as you first; only when it says that takes an administrator does macOS's own password dialog
+    come up, for a command made of nothing but tmutil's path and those dates. What went is counted
+    by listing them again."""
+    now = snapshot_dates()
+    if now is None:
+        return {"ok": False, "text": "Time Machine did not answer. Nothing changed."}
+    asked = [date for date in now if date in SNAPSHOTS and SNAPSHOT_DATE.fullmatch(date)]
+    if not asked:
+        return {"ok": False, "text": "The snapshots that were listed are gone already."}
+    said = []
+    for date in asked:
+        try:
+            done = run(["/usr/bin/tmutil", "deletelocalsnapshots", date], timeout=300)
+            said.append(done.stderr + done.stdout if done.returncode or "Failed" in done.stderr + done.stdout else "")
+        except (OSError, subprocess.TimeoutExpired):
+            said.append("Time Machine did not answer.")
+    left = snapshot_dates()
+    cancelled = False
+    if left and any(date in left for date in asked) and any(NEEDS_ADMIN.search(words) for words in said):
+        work = "; ".join(f"/usr/bin/tmutil deletelocalsnapshots {date}" for date in asked
+                         if date in left and SNAPSHOT_DATE.fullmatch(date))
+        try:
+            done = run(["/usr/bin/osascript", "-e", f'do shell script "{work}" with administrator privileges'], timeout=900)
+            cancelled = "-128" in done.stderr
+            said = [done.stderr if done.returncode else ""]
+        except (OSError, subprocess.TimeoutExpired):
+            said = ["It did not finish."]
+        left = snapshot_dates()
+    if left is None:
+        return {"ok": False, "text": "Time Machine did not answer afterwards, so headroom can't say what went."}
+    stayed = [date for date in asked if date in left]
+    gone = len(asked) - len(stayed)
+    SNAPSHOTS[:] = left
+    why = next((sentence(first_line(words)) for words in said if first_line(words)), "")
+    if gone:
+        remember(count(gone, "Time Machine local snapshot", "Time Machine local snapshots"), "snapshots", [], 0,
+                 "partly" if stayed else "deleted", f"{len(stayed)} stayed. {why}".strip() if stayed else "")
+    if not stayed:
+        return {"ok": True, "text": f"Removed {count(gone, 'snapshot', 'snapshots')}. Free space can take a while to go up."}
+    if cancelled:
+        return {"ok": False, "text": "Cancelled. " + ("Nothing changed." if not gone else f"{count(gone, 'snapshot', 'snapshots')} went before that.")}
+    return {"ok": False, "text": f"{'Removed ' + str(gone) + ' of ' + str(len(asked)) + '. ' if gone else ''}"
+                                 f"macOS kept {count(len(stayed), 'snapshot', 'snapshots')}. {why}".strip()}
 
 
 # --- the server ---------------------------------------------------------------------------------------
@@ -3874,10 +4283,12 @@ class Handler(BaseHTTPRequestHandler):
         DEADLINE = time.time() + IDLE
         if url.path == "/api/start":
             add_sample(disk()["free_kb"])           # one reading per scan, for the History chart
+            chosen = settings()
+            # iCloud Drive is not one of the places looked at unless its switch is on.
             sources = [{"id": name, "groups": list(groups), "slow": SLOW.get(name, "")}
-                       for name, (groups, _) in SOURCES.items()]
+                       for name, (groups, _) in SOURCES.items() if name != "cloud" or chosen["cloud"]]
             return self.reply(200, {"sources": sources, "disk": disk(), "last": last_scan(),
-                                    "trash": settings()["trash"]})
+                                    "trash": chosen["trash"], "cloud": chosen["cloud"]})
         if url.path == "/api/progress":
             return self.reply(200, {**JOB, "disk": disk()})
         if url.path == "/api/blocked":
@@ -3920,6 +4331,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, space_history())
         if url.path == "/api/growth":
             return self.reply(200, growth())
+        if url.path == "/api/snapshots":
+            return self.reply(200, list_snapshots())
         if url.path == "/api/update":
             return self.reply(200, update_info(query.get("force", [""])[0] == "1"))
         if url.path == "/api/ping":
@@ -4004,10 +4417,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, trash_extras([(p["id"], p["keep"]) for p in picks]))
         if self.path == "/api/settings":
             current = settings()
-            for key in ("alert", "weekly", "trash"):
-                # Where cleaned files go doesn't change under a delete that is running.
-                if isinstance(data.get(key), bool) and not (key == "trash" and JOB["running"]):
+            for key in ("alert", "weekly", "trash", "cloud"):
+                # Where cleaned files go, and what may go, doesn't change under a delete that is running.
+                if isinstance(data.get(key), bool) and not (key in ("trash", "cloud") and JOB["running"]):
                     current[key] = data[key]
+            if not current["cloud"]:
+                with LOCK:                  # switched off: its rows are not this launch's any more
+                    FOUND.pop("cloud", None)
+                CLOUD_ROOTS[:] = []
             if isinstance(data.get("alert_gb"), int) and 1 <= data["alert_gb"] <= 1000:
                 current["alert_gb"] = data["alert_gb"]
             save_state("settings.json", current)
@@ -4016,6 +4433,9 @@ class Handler(BaseHTTPRequestHandler):
             except OSError as error:
                 return self.reply(500, {"error": sentence(error.strerror or error)})
             return self.reply(200, {**settings(), "available": launcher_program() is not None})
+        if self.path == "/api/snapshots":
+            # No dates come from the page: the ones it was last shown are the ones that go.
+            return self.reply(200, remove_snapshots())
         if not wanted and self.path in ("/api/protect", "/api/unprotect", "/api/uninstall",
                                         "/api/reveal", "/api/trash", "/api/maintain", "/api/startup"):
             return self.reply(400, {"error": "Send the id of what to act on."})

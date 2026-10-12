@@ -893,7 +893,7 @@ try:
     cleaner.startup_dirs = real_dirs
 
     # --- reminders: the agent's check, with a stand-in for statfs ---------------------------------
-    assert cleaner.settings() == {"alert": True, "weekly": True, "alert_gb": 20, "trash": False}, \
+    assert cleaner.settings() == {"alert": True, "weekly": True, "alert_gb": 20, "trash": False, "cloud": False}, \
         "reminders on by default, below 20 GB; Move to Trash off"
     free = [12e9 / 1024]
     cleaner.disk_free_kb = lambda: int(free[0])
@@ -1213,7 +1213,9 @@ try:
     assert all("not what the scan found" in r["errors"][0] for r in cleaner.JOB["results"][:2])
     said = cleaner.history()[0]
     assert said["what"] == f"4 screenshots from {month(45)}" and said["result"] == "partly" and said["section"] == "shots", said
-    assert said["error"].startswith("2 of them stayed. Left alone") and len(said["paths"]) == 4 and said["kb"] >= 80, said
+    assert said["error"].startswith("2 of them stayed. Left alone") and len(said["paths"]) == 4, said
+    # The two that were swapped for something smaller were never handed over: that is not space headroom freed.
+    assert said["kb"] == 0 and [r["freed_kb"] for r in cleaner.JOB["results"]] == [0, 0, 0, 0], said
     os.remove(old_shots[0])
     os.rmdir(old_shots[1])
     for moved in old_shots[:2]:
@@ -1337,6 +1339,11 @@ try:
         with open(settings_file, "w") as handle:
             handle.write(broken)
         assert cleaner.settings_broken(), broken
+        assert cleaner.settings()["cloud"] is False, "unreadable settings: local copies of iCloud files are not offered"
+    for not_on in ('{"cloud": "yes"}', '{"cloud": 1}', '{"cloud": null}', '{"cloud": false}', "{}"):
+        with open(settings_file, "w") as handle:
+            handle.write(not_on)
+        assert cleaner.settings()["cloud"] is False, not_on
     with open(settings_file, "w") as handle:
         handle.write(was)
     os.rename(settings_file, settings_file + ".aside")
@@ -1751,6 +1758,539 @@ try:
     spot["hits"] = []
     assert spotlit(cleaner.scan_archives) == ([], ""), "nothing found says nothing: an empty section is enough"
 
+    # --- local copies of iCloud Drive files: the helper names them, every one is checked, none is deleted ---
+    cleaner.CLOUD_MIN_KB, cleaner.MESSAGE_MIN_KB = 64, 64
+    drive = os.path.join(cleaner.HOME, "Library", "Mobile Documents", "com~apple~CloudDocs")
+    film = shot("film.mov", 100, folder=os.path.join(drive, "Projects"), kb=200)
+    talk = shot("talk.key", 60, folder=os.path.join(drive, "Projects"), kb=150)
+    just_used = shot("draft.mov", 2, folder=os.path.join(drive, "Projects"), kb=120)
+    solo = shot("one.psd", 90, folder=os.path.join(drive, "Solo"), kb=100)
+    on_desktop = shot("clip.mp4", 90, kb=100)                                  # the Desktop is in iCloud here
+    assert os.path.exists(old_clip) and os.path.exists(unzipped) and os.path.exists(trained)
+    cloud_only = shot("only-in-icloud.mov", 90, folder=os.path.join(drive, "Projects"), kb=100)
+    placeholders.add(os.stat(cloud_only).st_ino)
+    os.symlink(outside, os.path.join(drive, "way-out"))
+    os.symlink(kept_outside, os.path.join(drive, "Projects", "linked.mov"))
+    not_cloud = [
+        shot("small.txt", 90, folder=drive, kb=10), cloud_only,                 # under 10 MB; not on this Mac at all
+        old_clip, unzipped, trained,                                            # a screen recording, an archive, a model: other sections' rows
+        shot("Setup.dmg", 90, kb=100),                                          # Installer files has it
+        put("Documents", "proj", "node_modules", "x", "blob.dat", kb=100),      # a project's build folder
+        shot("hidden.mov", 90, folder=os.path.join(drive, ".Trash"), kb=100),   # iCloud Drive's own Trash
+        shot("slide.mov", 90, folder=os.path.join(drive, "Deck.key"), kb=100),  # inside a package, which stays whole
+        os.path.join(drive, "Projects"),                                        # a folder is never named
+        os.path.join(drive, "way-out", "precious", "file"), os.path.join(drive, "Projects", "linked.mov"),     # by way of a link
+        kept_outside, "/etc/hosts", os.path.join(drive, "Projects", "..", "Projects", "film.mov"),
+        put("Downloads", "big-download.mov", kb=100),                           # not an iCloud folder, whatever the helper says
+        os.path.join(drive, "Projects", "gone.mov")]
+    cleaner.CLOUD = "/fake/headroom-cloud"
+    icloud = {"drive": True, "online": True, "roots": [drive, desktop, docs, os.path.join(cleaner.HOME, "Downloads"), "/etc", outside],
+              "files": [film, talk, just_used, solo, on_desktop] + not_cloud, "code": 0, "raw": None, "refuse": {}, "extra": [],
+              "messages": False, "account": True}
+
+    def cloud_says(command):
+        if command[0] == cleaner.CLOUD:
+            if command[1] == "list":
+                assert command[2:] == [str(cleaner.CLOUD_MIN_KB * 1024)], command
+                said = {"drive": icloud["drive"], "online": icloud["online"], "roots": icloud["roots"], "account": icloud["account"],
+                        "files": [{"path": p, "bytes": 99 ** 9, "used": 0} for p in icloud["files"]] + [None, {"path": 7}, "x"]}
+                return icloud["code"], icloud["raw"] if icloud["raw"] is not None else json.dumps(said)
+            assert command[1:3] == ["evict", "--"], command
+            if icloud["code"] or icloud["raw"] is not None:
+                return icloud["code"], icloud["raw"] or ""      # it broke before it touched anything
+            answers = []
+            for p in command[3:]:
+                why = icloud["refuse"].get(p, "")
+                if why is None:
+                    continue                    # no answer at all for this one
+                if not why and p not in icloud.get("lazy", ()):
+                    os.truncate(p, 0)           # what macOS does: the file stays, its contents leave this Mac
+                answers.append({"path": p, "ok": not why, "why": why})
+            return 0, json.dumps(answers + icloud["extra"])
+        if command[:3] == ["/usr/bin/defaults", "read", "com.apple.madrid"]:
+            return (0, "1\n") if icloud["messages"] else (1, "")
+        return spot_says(command)
+    cloud_fakes = {"answer": cloud_says, "fakes": ["/fake/headroom-cloud", "/usr/bin/defaults", "/usr/bin/mdfind"]}
+
+    def clouded(scan):
+        with recording(Recorder(never=("/bin/rm",), **cloud_fakes)) as recorder:
+            found = scan()
+        return found[0], found[1], recorder
+
+    def offer_cloud(on):
+        cleaner.save_state("settings.json", {**cleaner.settings(), "cloud": on})
+    # Off unless switched on under Maintenance: then the helper isn't even asked.
+    cleaner.CLOUD_ROOTS[:] = [drive]
+    found, notice, recorder = clouded(cleaner.scan_cloud)
+    assert (found, notice, recorder.calls, cleaner.CLOUD_ROOTS) == ([], "", [], []), "off by default"
+    offer_cloud(True)
+    # A file that changed in the last hour is never listed: iCloud may not have the newest edit
+    # yet. Every file here was made a moment ago, as far as its attributes go.
+    found, notice, _ = clouded(cleaner.scan_cloud)
+    assert found == [] and notice == "", [row["name"] for row in found]
+    cleaner.clock = lambda: time.time() + 40 * 60
+    assert clouded(cleaner.scan_cloud)[0] == [], "forty minutes on, still inside the hour"
+    cleaner.clock = lambda: time.time() + 2 * 3600          # two hours on: the rest of these tests happen then
+    edited = shot("edited.mov", 90, folder=os.path.join(drive, "Projects"), kb=100)
+    os.utime(edited, (time.time() + 90 * 60,) * 2)         # its contents changed half an hour before "now"
+    icloud["files"].append(edited)
+    found, notice, recorder = clouded(cleaner.scan_cloud)
+    local = named(found)
+    assert "Projects / edited.mov" not in local
+    os.remove(edited)
+    icloud["files"].remove(edited)
+    assert sorted(local) == ["Desktop / clip.mp4", "Projects / draft.mov", "Projects / film.mov", "Projects / talk.key", "Solo / one.psd"], sorted(local)
+    assert notice == "" and recorder.calls[0] == [cleaner.CLOUD, "list", str(64 * 1024)]
+    assert cleaner.CLOUD_ROOTS == [drive, desktop, docs], "only iCloud Drive, Desktop and Documents can be iCloud's"
+    assert all(row["group"] == "cloud" and row["evict"] and not row["trash"] and not row["cmd"] and len(row["paths"]) == 1 for row in found)
+    assert all(row["seen"] == {row["paths"][0]: 0o100000} and row["when"] > 0 for row in found)
+    assert not set(p for row in found for p in row["paths"]) & set(not_cloud)
+    assert 190 <= local["Projects / film.mov"]["kb"] <= 210, "measured here: what the helper says about sizes is not taken"
+    assert local["Projects / film.mov"]["detail"] == "iCloud Drive/Projects · opened or changed 3 months ago"
+    assert local["Desktop / clip.mp4"]["detail"].startswith("~/Desktop · opened or changed ")
+    # A folder or a link is never a row, also where its size would not rule it out.
+    cleaner.CLOUD_MIN_KB = 0
+    tiny = {p for row in clouded(cleaner.scan_cloud)[0] for p in row["paths"]}
+    assert os.path.join(drive, "small.txt") in tiny and not tiny & set(not_cloud[1:]), tiny & set(not_cloud[1:])
+    cleaner.CLOUD_MIN_KB = 64
+    clouded(cleaner.scan_cloud)
+    # One bundle a folder. Ticking the whole section leaves out what was opened or changed in the last 30 days.
+    assert [name for name, row in local.items() if row["recent"]] == ["Projects / draft.mov"]
+    assert local["Projects / draft.mov"]["note"].startswith("Opened or changed in the last 30 days, so ticking the whole section leaves it out.")
+    assert local["Projects / film.mov"]["note"] == "Only the copy on this Mac goes. The file stays in iCloud."
+    in_projects = local["Projects / film.mov"]["bundle"]
+    assert re.fullmatch(r"cloud:[0-9a-f]{12}", in_projects["key"]) and in_projects == {
+        "key": in_projects["key"], "noun": "files in Projects", "detail": "iCloud Drive/Projects",
+        "note": "They stay in iCloud and download again when you open them.", "left": "opened or changed in the last 30 days",
+        "folder": os.path.join(drive, "Projects"), "min": 1}
+    assert local["Projects / talk.key"]["bundle"] is local["Projects / draft.mov"]["bundle"] is in_projects is not local["Solo / one.psd"]["bundle"]
+    # Never Safe clean, and the Move to Trash switch does not grey these out: they go neither way.
+    for row in found:
+        shown = cleaner.public(row, "", True)
+        assert shown["evict"] and not shown["safe"] and not shown["trash"] and shown["blocked"] == "" and cleaner.stays_put(row) == ""
+    # Nothing is offered when iCloud Drive isn't there, when the Mac is offline, or when the helper is missing or garbled.
+    icloud["drive"] = False
+    assert clouded(cleaner.scan_cloud)[:2] == ([], "iCloud Drive isn't set up on this Mac, so there are no local copies to remove.")
+    assert cleaner.CLOUD_ROOTS == []
+    icloud.update(drive=True, online=False)
+    found, notice, _ = clouded(cleaner.scan_cloud)
+    assert found == [] and isinstance(notice, cleaner.Unsure) and notice.startswith("This Mac is offline.") and cleaner.CLOUD_ROOTS == []
+    icloud["online"] = True
+    # Nobody signed in, as far as macOS says: the section says so when there is nothing to list. It
+    # is only a sentence: what makes a file safe to name is what macOS says about the file itself.
+    icloud["account"] = False
+    assert len(clouded(cleaner.scan_cloud)[0]) == 5 and clouded(cleaner.scan_cloud)[1] == ""
+    kept_files, icloud["files"] = icloud["files"], not_cloud
+    assert clouded(cleaner.scan_cloud)[:2] == ([], "macOS says nobody is signed in to iCloud Drive on this Mac, so there are no local copies to remove.")
+    icloud["account"] = True
+    assert clouded(cleaner.scan_cloud)[:2] == ([], "")
+    icloud["files"] = kept_files
+    for code, raw in ((1, None), (0, "not json"), (0, "[]"), (0, '{"drive": true, "online": true, "roots": "x", "files": []}'),
+                      (0, '{"drive": true, "online": true, "roots": []}')):
+        icloud.update(code=code, raw=raw)
+        found, notice, _ = clouded(cleaner.scan_cloud)
+        assert found == [] and isinstance(notice, cleaner.Unsure) and "did not answer" in notice, (code, raw, notice)
+    icloud.update(code=0, raw=None)
+    cleaner.CLOUD = None
+    found, notice, recorder = clouded(cleaner.scan_cloud)
+    assert found == [] and notice.startswith("Removing local copies needs the small helper") and not recorder.calls
+    cleaner.CLOUD = "/fake/headroom-cloud"
+
+    # Removing the local copies: one call to the helper for all of them, never rm, never Finder,
+    # whatever the Move to Trash switch says. The files are still there afterwards.
+    def cloud_rows():
+        return named(clouded(cleaner.scan_cloud)[0])
+    lines_before = len(cleaner.history())
+    for to_trash in (False, True):
+        local = cloud_rows()
+        picked = [local["Projects / film.mov"], local["Projects / talk.key"], local["Solo / one.psd"]]
+        recorder, results = job(picked, to_trash, **cloud_fakes)
+        assert recorder.calls == [[cleaner.CLOUD, "evict", "--", film, talk, solo]], recorder.calls
+        assert all(r["evicted"] and not r["trashed"] and not r["errors"] and r["left_kb"] == 0 for r in results), results
+        assert [r["freed_kb"] > 90 for r in results] == [True] * 3 and all(os.path.isfile(p) for p in (film, talk, solo))
+        said = cleaner.history()[:2]
+        assert [(e["what"], e["result"], e["section"]) for e in said] == [
+            ("Solo / one.psd", "evicted", "cloud"), ("2 files in Projects", "evicted", "cloud")], said
+        assert said[1]["paths"] == [cleaner.tilde(film), cleaner.tilde(talk)] and said[1]["kb"] > 300
+        for p, kb in ((film, 200), (talk, 150), (solo, 100)):       # downloaded again
+            with open(p, "wb") as handle:
+                handle.write(os.urandom(kb * 1024))
+            age(p, 90)
+    assert len(cleaner.history()) == lines_before + 4
+    assert cleaner.space_history()["marks"][-1][1] > 0, "what was freed this way shows on the chart"
+    # The helper refuses one: that row says why and stays as it was. A path it did not answer for
+    # stays too, and so does one it answered "ok" for in any other way than a plain yes.
+    local = cloud_rows()
+    icloud["refuse"] = {talk: "It is being uploaded.", solo: None}
+    icloud["extra"] = [{"path": kept_outside, "ok": True, "why": ""}, {"path": solo, "ok": "yes", "why": ""}, "x", None]
+    recorder, results = job([local["Projects / film.mov"], local["Projects / talk.key"], local["Solo / one.psd"]], **cloud_fakes)
+    assert [r["errors"] for r in results] == [[], ["It is being uploaded."], ["macOS kept the copy."]], [r["errors"] for r in results]
+    assert [r["freed_kb"] > 0 for r in results] == [True, False, False] and os.path.getsize(talk) == 150 * 1024
+    assert cleaner.history()[1]["result"] == "partly" and cleaner.history()[1]["error"] == "It is being uploaded."
+    assert cleaner.history()[0]["result"] == "failed" and os.path.exists(kept_outside)
+    icloud.update(refuse={}, extra=[])
+    # A helper that fails as a whole, or says something else than a list: nothing is taken as gone.
+    for code, raw in ((1, None), (0, "{}"), (0, "nonsense"), (1, json.dumps([{"path": talk, "ok": True, "why": ""}]))):
+        icloud.update(code=code, raw=raw)
+        recorder, results = job([local["Projects / talk.key"]], **cloud_fakes)
+        assert [r["errors"] for r in results] == [["headroom's iCloud helper did not answer, so the copy stayed."]], results
+        assert results[0]["freed_kb"] == 0 and os.path.getsize(talk) == 150 * 1024
+    icloud.update(code=0, raw=None)
+    with open(film, "wb") as handle:
+        handle.write(os.urandom(200 * 1024))
+    age(film, 100)
+    # What the helper says that isn't an answer (a path that is a list, say) is no answer, and no crash.
+    local = cloud_rows()
+    icloud["refuse"] = {talk: None}
+    icloud["extra"] = [{"path": [talk], "ok": True, "why": ""}, {"path": {"a": talk}, "ok": True}, {"path": None, "ok": True}, {"ok": True}]
+    recorder, results = job([local["Projects / talk.key"]], **cloud_fakes)
+    assert [r["errors"] for r in results] == [["headroom's iCloud helper did not answer, so the copy stayed."]], results
+    assert results[0]["freed_kb"] == 0 and os.path.getsize(talk) == 150 * 1024
+    icloud.update(refuse={}, extra=[])
+    # Only a plain yes counts as freed. The helper refuses a file that macOS has meanwhile removed
+    # the copy of by itself: its room did come back, and it was not headroom's doing.
+    local = cloud_rows()
+    os.truncate(talk, 0)
+    icloud["refuse"] = {talk: "The copy on this Mac is not the newest version, or is not here."}
+    recorder, results = job([local["Projects / talk.key"]], **cloud_fakes)
+    assert (results[0]["freed_kb"], results[0]["evicted"], results[0]["asked"]) == (0, True, False), results
+    assert results[0]["errors"] == ["The copy on this Mac is not the newest version, or is not here."]
+    said = cleaner.history()[0]
+    assert (said["result"], said["kb"]) == ("failed", 0), said
+    icloud["refuse"] = {}
+    with open(talk, "wb") as handle:
+        handle.write(os.urandom(150 * 1024))
+    age(talk, 60)
+    # The helper says yes and nothing has shrunk yet (macOS may free the room after the call
+    # returns): that is "asked", never "evicted", and no size is given for it.
+    local = cloud_rows()
+    icloud["lazy"] = {film, solo}
+    recorder, results = job([local["Projects / film.mov"], local["Projects / talk.key"], local["Solo / one.psd"]], **cloud_fakes)
+    assert [(r["asked"], r["evicted"], r["freed_kb"] > 0, r["left_kb"], r["errors"]) for r in results] == [
+        (True, False, False, 0, []), (False, True, True, 0, []), (True, False, False, 0, [])], results
+    said = cleaner.history()[:2]
+    assert (said[0]["what"], said[0]["result"], said[0]["kb"]) == ("Solo / one.psd", "asked", 0), said[0]
+    assert (said[1]["what"], said[1]["result"]) == ("2 files in Projects", "evicted") and 140 <= said[1]["kb"] <= 160, \
+        "one measured, one asked: the size is the measured one's"
+    assert os.path.getsize(film) == 200 * 1024 and os.path.getsize(solo) == 100 * 1024
+    marks_before = cleaner.space_history()["marks"]
+    with open(talk, "wb") as handle:
+        handle.write(os.urandom(150 * 1024))
+    age(talk, 60)
+    local = cloud_rows()
+    icloud["lazy"] = {film, talk}
+    recorder, results = job([local["Projects / film.mov"], local["Projects / talk.key"]], **cloud_fakes)
+    said = cleaner.history()[0]
+    assert (said["what"], said["result"], said["kb"]) == ("2 files in Projects", "asked", 0) and "error" not in said, said
+    assert cleaner.space_history()["marks"] == marks_before, "nothing measured is not a dot on the chart"
+    icloud["lazy"] = set()
+    # Measuring afterwards can fail (a Mac out of processes). What went has gone all the same: it
+    # is recorded without a size, and the job ends. Both kinds of batch.
+    local = cloud_rows()
+    for row in crowd:
+        row["kb"] = 40
+    real_du, lines_before = cleaner.du, len(cleaner.history(10 ** 6))
+
+    def no_du(paths, complaints=None):
+        raise OSError(35, "Resource temporarily unavailable")
+    cleaner.du = no_du
+    cleaner.JOB["running"] = True
+    recorder, results = job([crowd[0], crowd[1], local["Projects / film.mov"]], **cloud_fakes)
+    cleaner.du = real_du
+    assert cleaner.JOB["running"] is False and len(recorder.calls) == 2, recorder.calls
+    assert [(r["unmeasured"], r["asked"], r["trashed"], r["freed_kb"], r["left_kb"], r["errors"]) for r in results] == [
+        (True, False, True, 0, 0, []), (True, False, True, 0, 0, []), (True, True, False, 0, 0, [])], results
+    said = cleaner.history(10 ** 6)[:len(cleaner.history(10 ** 6)) - lines_before]
+    assert [(e["what"], e["result"], e["kb"], e.get("note", "")) for e in said] == [
+        ("Projects / film.mov", "asked", 0, ""), (crowd[1]["name"], "trashed", 0, "What it freed could not be measured."),
+        (crowd[0]["name"], "trashed", 0, "What it freed could not be measured.")], said
+    with open(film, "wb") as handle:
+        handle.write(os.urandom(200 * 1024))
+    age(film, 100)
+    # And whatever else goes wrong inside a job, it does not stay "running" for good.
+    real_finder = cleaner.finder_trash_many
+
+    def broken_finder(paths):
+        raise RuntimeError("not something a job expects")
+    cleaner.finder_trash_many = broken_finder
+    cleaner.JOB.update(running=True, results=[], done_kb=0, stopping=False)
+    try:
+        with recording(Recorder(never=("/bin/rm",))):
+            cleaner.run_job([crowd[0]])
+    except RuntimeError:
+        pass
+    cleaner.finder_trash_many = real_finder
+    assert cleaner.JOB["running"] is False and cleaner.JOB["current"] is None, "a later delete is not turned away"
+    # Looked at again right before: a file that is not what the scan saw, or not in a folder the
+    # last listing named as iCloud's, never reaches the helper. Nor does one that changed in the
+    # last hour, however old the listing, nor anything once the switch is off.
+    local = cloud_rows()
+    os.utime(film, (cleaner.clock() - 600,) * 2)
+    recorder, results = job([local["Projects / film.mov"]], **cloud_fakes)
+    assert recorder.calls == [] and results[0]["errors"] == [f"Left alone, it changed in the last hour: {cleaner.tilde(film)}"], results
+    age(film, 100)
+    cleaner.clock = lambda: time.time() + 40 * 60
+    assert cleaner.evict_plan(local["Projects / film.mov"])[1] == [], "something about it changed in the last hour"
+    cleaner.clock = lambda: time.time() + 2 * 3600
+    assert cleaner.evict_plan(local["Projects / film.mov"]) == ([], [film])
+    offer_cloud(False)
+    recorder, results = job([local["Projects / film.mov"], local["Solo / one.psd"]], **cloud_fakes)
+    assert recorder.calls == [] and all(r["errors"] == ["Left alone: local copies of iCloud Drive files are switched off under Maintenance."]
+                                        and r["freed_kb"] == 0 for r in results), results
+    with open(settings_file, "w") as handle:
+        handle.write("{")                       # settings that can't be read: off
+    assert cleaner.evict_plan(local["Projects / film.mov"])[1] == []
+    offer_cloud(True)
+    assert cleaner.evict_plan(local["Projects / film.mov"]) == ([], [film]) and os.path.getsize(film) == 200 * 1024
+    os.rename(solo, solo + ".kept")
+    os.symlink(kept_outside, solo)
+    recorder, results = job([local["Solo / one.psd"]], **cloud_fakes)
+    assert recorder.calls == [] and results[0]["errors"][0].startswith("Left alone, it is not what the scan found there any more"), results
+    os.remove(solo)
+    os.makedirs(solo)
+    assert cleaner.evict_plan(local["Solo / one.psd"]) == ([f"Left alone, it is not what the scan found there any more: {cleaner.tilde(solo)}"], [])
+    os.rmdir(solo)
+    os.rename(solo + ".kept", solo)
+    assert cleaner.evict_plan(local["Solo / one.psd"]) == ([], [solo])
+    elsewhere = cleaner.item("cloud", "Downloads / big-download.mov", [os.path.join(cleaner.HOME, "Downloads", "big-download.mov")], 100)
+    elsewhere["evict"], elsewhere["seen"] = True, {elsewhere["paths"][0]: 0o100000}
+    recorder, results = job([elsewhere], **cloud_fakes)
+    assert recorder.calls == [] and results[0]["errors"] == ["Left alone, it is outside iCloud Drive: ~/Downloads/big-download.mov"]
+    unseen = cleaner.item("cloud", "Projects / film.mov", [film], 200)
+    unseen["evict"] = True
+    assert cleaner.evict_plan(unseen)[1] == [], "a row the scan did not look at names nothing"
+    icloud["drive"] = False
+    clouded(cleaner.scan_cloud)                 # iCloud Drive was switched off since
+    recorder, results = job([local["Projects / film.mov"]], **cloud_fakes)
+    assert recorder.calls == [] and "outside iCloud Drive" in results[0]["errors"][0] and os.path.getsize(film) == 200 * 1024
+    icloud["drive"] = True
+    # delete() by itself goes the same way: the helper, never rm.
+    local = cloud_rows()
+    icloud["extra"] = [{"path": kept_outside, "ok": False, "why": "Said about a file nobody asked about."}]
+    with recording(Recorder(never=("/bin/rm", "/usr/bin/osascript"), **cloud_fakes)) as recorder:
+        assert cleaner.delete(local["Projects / talk.key"], True)["errors"] == []
+    icloud["extra"] = []
+    assert recorder.calls == [[cleaner.CLOUD, "evict", "--", talk]] and os.path.isfile(talk) and os.path.getsize(talk) == 0
+    with open(talk, "wb") as handle:
+        handle.write(os.urandom(150 * 1024))
+    age(talk, 60)
+    # Rows that go different ways never share a call, and keep their order.
+    local = cloud_rows()
+    for row in crowd:
+        row["kb"] = 40
+    recorder, results = job([crowd[0], local["Projects / film.mov"], local["Projects / talk.key"], crowd[1], local["Solo / one.psd"]], **cloud_fakes)
+    assert recorder.calls == [finder + crowd[0]["paths"], [cleaner.CLOUD, "evict", "--", film, talk], finder + crowd[1]["paths"],
+                              [cleaner.CLOUD, "evict", "--", solo]], recorder.calls
+    assert [(r["trashed"], r["evicted"]) for r in results] == [(True, False), (False, True), (False, True), (True, False), (False, True)]
+    for p, kb, days in ((film, 200, 100), (talk, 150, 60), (solo, 100, 90)):
+        with open(p, "wb") as handle:
+            handle.write(os.urandom(kb * 1024))
+        age(p, days)
+    # A hundred to a call, and Stop is asked between calls.
+    many_local = []
+    for n in range(130):
+        row = cleaner.item("cloud", f"Many / m{n:03}", [put(f"m{n:03}", kb=1, root=os.path.join(drive, "Many"))], 1)
+        row["evict"], row["seen"] = True, {row["paths"][0]: 0o100000}
+        many_local.append(row)
+    cloud_rows()
+    recorder, results = job(many_local, **cloud_fakes)
+    assert [len(call) - 3 for call in recorder.calls] == [100, 30] and len(results) == 130
+
+    def stop_then_say(command):
+        cleaner.JOB["stopping"] = True
+        return cloud_says(command)
+    recorder, results = job(many_local, answer=stop_then_say, fakes=cloud_fakes["fakes"])
+    assert len(recorder.calls) == 1 and len(results) == 100, (len(recorder.calls), len(results))
+    shutil.rmtree(os.path.join(drive, "Many"))
+
+    # --- Mail and Messages attachments: yours, behind Full Disk Access, always to the Trash ---------------
+    mail_folder = os.path.join(cleaner.HOME, "Library", "Containers", "com.apple.mail", "Data", "Library", "Mail Downloads")
+    report = shot("report.pdf", 40, folder=os.path.join(mail_folder, "A1B2"), kb=80)
+    photo = shot("photo.heic", 3, folder=os.path.join(mail_folder, "C3D4"), kb=30)
+    loose_copy = shot("loose.txt", 40, folder=mail_folder, kb=20)
+    mail_installer = shot("Tool.dmg", 40, folder=os.path.join(mail_folder, "E5F6"), kb=90)      # Installer files has it
+    mail_torrent = shot("old.torrent", 40, folder=os.path.join(mail_folder, "E5F7"), kb=1)
+    os.makedirs(os.path.join(mail_folder, "G7H8"))
+    os.symlink(kept_outside, os.path.join(mail_folder, "G7H8", "linked.pdf"))
+    messages = os.path.join(cleaner.HOME, "Library", "Messages")
+    movie = shot("movie.mov", 40, folder=os.path.join(messages, "Attachments", "ab", "12", "GUID-1"), kb=200)
+    song = shot("song.m4a", 400, folder=os.path.join(messages, "Attachments", "cd", "03", "GUID-2"), kb=100)
+    small_photo = shot("small.jpg", 40, folder=os.path.join(messages, "Attachments", "cd", "04", "GUID-3"), kb=20)    # under 20 MB
+    cloud_video = shot("in-icloud.mov", 40, folder=os.path.join(messages, "Attachments", "cd", "05", "GUID-4"), kb=100)
+    placeholders.add(os.stat(cloud_video).st_ino)
+    os.symlink(kept_outside, os.path.join(messages, "Attachments", "cd", "05", "GUID-4", "linked.mov"))
+    os.symlink(outside, os.path.join(messages, "Attachments", "way-out"))
+    chat_db = put("Library", "Messages", "chat.db", kb=300)
+    chat_before = os.stat(chat_db)
+    found, notice, recorder = clouded(cleaner.scan_attachments)
+    attached = named(found)
+    assert sorted(attached) == ["loose.txt", "movie.mov", "photo.heic", "report.pdf", "song.m4a"], sorted(attached)
+    assert notice == "" and all(row["group"] == "mail" and row["trash"] and not row["evict"] and not row["cmd"] for row in found)
+    assert not any(cleaner.public(row, "")["safe"] for row in found), "never Safe clean"
+    assert all(row["seen"] == {row["paths"][0]: 0o100000} and row["when"] > 0 for row in found)
+    assert attached["report.pdf"]["paths"] == [report] and attached["report.pdf"]["detail"].startswith("A copy Mail made · added ")
+    downloads = attached["report.pdf"]["bundle"]
+    assert downloads == {"key": "mail:downloads", "noun": "copies of attachments Mail opened", "detail": cleaner.tilde(mail_folder),
+                         "note": "The messages keep the originals.", "folder": mail_folder, "min": 1}
+    assert attached["photo.heic"]["bundle"] is attached["loose.txt"]["bundle"] is downloads
+    assert not attached["report.pdf"]["recent"] and not attached["photo.heic"]["recent"]
+    # A copy that goes missing while the scan is at it is just not listed: the others still are.
+    real_du = cleaner.du
+
+    def du_then_gone(paths, complaints=None):
+        sizes = real_du(paths, complaints)
+        if photo in paths:
+            os.rename(photo, photo + ".aside")
+        return sizes
+    cleaner.du = du_then_gone
+    lost, notice, _ = clouded(cleaner.scan_attachments)
+    cleaner.du = real_du
+    os.rename(photo + ".aside", photo)
+    assert sorted(named(lost)) == ["loose.txt", "movie.mov", "report.pdf", "song.m4a"] and notice == "", sorted(named(lost))
+    # A Messages attachment is part of a conversation. Ticking the section never picks one, and
+    # the row and its bundle say what removing it does.
+    blank = "Removing it leaves a blank spot in its conversation in Messages on this Mac."
+    for name, path in (("movie.mov", movie), ("song.m4a", song)):
+        row = attached[name]
+        assert row["paths"] == [path] and row["recent"] and row["trash"] and row["detail"].startswith("In a Messages conversation · added ")
+        assert row["note"] == blank + " Tick it yourself: ticking the whole section leaves it out.", row["note"]
+        assert re.fullmatch(r"messages:\d{4}-\d\d", row["bundle"]["key"]) and row["bundle"]["left"] == "each is part of a conversation"
+        assert row["bundle"]["note"] == "Removing one leaves a blank spot in its conversation in Messages on this Mac."
+        assert row["bundle"]["noun"].startswith("Messages attachments from ") and row["bundle"]["folder"] == os.path.join(messages, "Attachments")
+    assert attached["movie.mov"]["bundle"] is not attached["song.m4a"]["bundle"], "a bundle for each month"
+    assert attached["report.pdf"]["rank"] > attached["movie.mov"]["rank"] > attached["song.m4a"]["rank"] > 0, \
+        "Mail's copies first, then Messages by month, the newest first"
+    cleaner.MESSAGE_MIN_KB = 0
+    every = named(clouded(cleaner.scan_attachments)[0])
+    assert "small.jpg" in every and "linked.mov" not in every and "in-icloud.mov" not in every, "a link is never a row, whatever its size"
+    cleaner.MESSAGE_MIN_KB = 64
+    icloud["messages"] = True
+    with_cloud = named(clouded(cleaner.scan_attachments)[0])
+    assert with_cloud["movie.mov"]["note"] == blank + " With Messages in iCloud on, it may still be in iCloud. Tick it yourself: ticking the whole section leaves it out."
+    assert with_cloud["movie.mov"]["bundle"]["note"].endswith("on this Mac. With Messages in iCloud on, they may still be in iCloud.")
+    assert "iCloud" not in with_cloud["report.pdf"]["bundle"]["note"]
+    icloud["messages"] = False
+    assert os.stat(chat_db) == chat_before, "chat.db is never read or touched"       # the same times, to the nanosecond
+    # They go to the Trash, switch or no switch: Finder, never rm.
+    recorder, results = job([attached["report.pdf"], attached["photo.heic"], attached["movie.mov"]], **cloud_fakes)
+    assert recorder.calls == [finder + [report, photo, movie]] and all(r["trashed"] and not r["evicted"] for r in results), recorder.calls
+    assert [(e["what"], e["result"]) for e in cleaner.history()[:2]] == [("movie.mov", "trashed"), ("2 copies of attachments Mail opened", "trashed")]
+    # Without Full Disk Access macOS keeps both folders shut: the section says so, and offers what it could read.
+    os.chmod(os.path.join(messages, "Attachments"), 0)
+    found, notice, _ = clouded(cleaner.scan_attachments)
+    assert sorted(named(found)) == ["loose.txt", "photo.heic", "report.pdf"] and notice.startswith(
+        "macOS keeps your Messages attachments behind Full Disk Access."), notice
+    os.chmod(mail_folder, 0)
+    found, notice, _ = clouded(cleaner.scan_attachments)
+    assert found == [] and notice.startswith("macOS keeps the copies Mail keeps of opened attachments and your Messages attachments behind Full Disk Access.")
+    os.chmod(mail_folder, 0o755)
+    os.chmod(os.path.join(messages, "Attachments"), 0o755)
+    icloud["files"] = [film, talk, just_used, solo, on_desktop] + not_cloud + [report, movie]     # and the helper names those too
+    assert not {report, movie} & {p for row in clouded(cleaner.scan_cloud)[0] for p in row["paths"]}
+
+    # --- a scan never opens a file that is only in iCloud: opening it would download it ------------------
+    app_zip = os.path.join(cleaner.HOME, "Downloads", "App.zip")
+    old_torrent = put("Downloads", "evicted.torrent", kb=1)
+    write(old_torrent, bencode({b"info": {b"name": b"Some Film", b"length": 5}}))
+    icloud_repo = os.path.join(docs, "in-icloud-repo")
+    for name in ("config", "HEAD", "index"):
+        put("Documents", "in-icloud-repo", ".git", name, kb=1)
+    put("Documents", "in-icloud-repo", "package.json", kb=1)
+    repo_build = os.path.dirname(put("Documents", "in-icloud-repo", "node_modules", "dep", kb=100))
+    assert cleaner.zipped_installer(app_zip) and cleaner.bfile(old_torrent) and not cleaner.git_in_icloud(icloud_repo)
+    only_in_icloud = {os.stat(p).st_ino for p in (app_zip, old_torrent, os.path.join(icloud_repo, ".git", "index"))}
+    placeholders.update(only_in_icloud)
+    assert not cleaner.zipped_installer(app_zip) and cleaner.bfile(old_torrent) is None, "neither is opened"
+    assert app_zip not in cleaner.find_installers()
+    with recording(Recorder(never=("/bin/rm",))) as recorder:
+        assert cleaner.git_tracked([repo_build]) == (set(), {repo_build}), "git is not asked: the folder is left out, unchecked"
+        assert cleaner.git_busy(icloud_repo) == "Part of its .git folder is only in iCloud, so headroom leaves it alone."
+    assert recorder.calls == [], recorder.calls
+    placeholders.difference_update(only_in_icloud)
+    assert app_zip in cleaner.find_installers()
+    shutil.rmtree(icloud_repo)
+    os.remove(old_torrent)
+
+    # --- Time Machine's local snapshots: listed by reading, removed by date and by nothing else ----------
+    taken = {"dates": ["2026-10-11-093012", "2026-10-12-010203"], "extra": [], "code": 0, "refuse": "", "admin": (0, "")}
+
+    def tm_says(command):
+        if command[0] == "/usr/bin/osascript":
+            if not taken["admin"][0]:
+                taken["dates"] = [d for d in taken["dates"] if d not in command[2]]
+            return taken["admin"]
+        assert command[0] == "/usr/bin/tmutil", command
+        if command[1:] == ["listlocalsnapshots", "/"]:
+            return taken["code"], "Snapshots for disk /:\n" + "".join(f"com.apple.TimeMachine.{d}.local\n" for d in taken["dates"] + taken["extra"])
+        assert command[1] == "deletelocalsnapshots" and len(command) == 3 and re.fullmatch(r"[0-9-]{17}", command[2]), command
+        if taken["refuse"]:
+            return 1, taken["refuse"]
+        taken["dates"].remove(command[2])
+        return 0, f"Deleted local snapshot '{command[2]}'\n"
+
+    def time_machine(work, stderr=""):
+        with recording(Recorder(answer=tm_says, stderr=stderr, fakes=["/usr/bin/tmutil"], never=("/bin/rm",))) as recorder:
+            return work(), recorder.calls
+    listing_call = ["/usr/bin/tmutil", "listlocalsnapshots", "/"]
+    oldest = int(time.mktime((2026, 10, 11, 9, 30, 12, 0, 0, -1)))
+    # Only Time Machine's own, and only names that are a date: nothing else in the listing counts.
+    taken["extra"] = ["2026-13-45-999999", "2026-10-11-093012; rm -rf ~", "2026-10-11-09301", "x"]
+    with recording(Recorder(answer=lambda command: (0, "Snapshots for disk /:\ncom.apple.os.update-ABC\n  com.apple.TimeMachine.2026-10-12-010203.local  \n"
+                                                       "com.apple.TimeMachine.2026-10-11-093012.local.extra\nrandom words\n"),
+                            fakes=["/usr/bin/tmutil"])) as recorder:
+        assert cleaner.list_snapshots() == {"count": 1, "oldest": int(time.mktime((2026, 10, 12, 1, 2, 3, 0, 0, -1))), "error": ""}
+    assert recorder.calls == [listing_call]
+    assert time_machine(cleaner.list_snapshots) == ({"count": 2, "oldest": oldest, "error": ""}, [listing_call])
+    assert cleaner.SNAPSHOTS == ["2026-10-11-093012", "2026-10-12-010203"]
+    for bad in ("2026-10-11-093012; rm -rf ~", "2026-10-11-093012 ", " 2026-10-11-093012", "2026-10-11-09301", "2026-13-45-999999",
+                "$(id)", "2026-10-11-093012\n", "", "２０２６-10-11-093012"):
+        assert cleaner.snapshot_time(bad) is None, bad
+    taken["code"] = 1
+    assert time_machine(cleaner.list_snapshots)[0] == {"count": 0, "oldest": 0, "error": "Time Machine did not answer."}
+    assert cleaner.SNAPSHOTS == [] and time_machine(cleaner.remove_snapshots) == (
+        {"ok": False, "text": "Time Machine did not answer. Nothing changed."}, [listing_call])
+    taken.update(code=0, extra=[])
+    # Removing: tmutil is asked as the person, a snapshot at a time. Only the ones the page was
+    # shown go: one made since stays, and no password is asked for when none is needed.
+    assert time_machine(cleaner.remove_snapshots) == ({"ok": False, "text": "The snapshots that were listed are gone already."}, [listing_call])
+    time_machine(cleaner.list_snapshots)
+    taken["dates"].append("2026-10-12-110000")
+    lines_before = len(cleaner.history(10 ** 6))
+    said, calls = time_machine(cleaner.remove_snapshots)
+    assert said == {"ok": True, "text": "Removed 2 snapshots. Free space can take a while to go up."}, said
+    assert calls == [listing_call, ["/usr/bin/tmutil", "deletelocalsnapshots", "2026-10-11-093012"],
+                     ["/usr/bin/tmutil", "deletelocalsnapshots", "2026-10-12-010203"], listing_call], calls
+    assert taken["dates"] == ["2026-10-12-110000"] and cleaner.SNAPSHOTS == ["2026-10-12-110000"]
+    said = cleaner.history()[0]
+    assert len(cleaner.history(10 ** 6)) == lines_before + 1 and (said["what"], said["section"], said["result"], said["paths"], said["kb"]) == (
+        "2 Time Machine local snapshots", "snapshots", "deleted", [], 0), said
+    # tmutil says it takes an administrator, in either of the two ways its program can: macOS's
+    # own password dialog, for a command made of nothing but tmutil and the dates.
+    for root_only in ("tmutil: deletelocalsnapshots requires root privileges.\n", "Must be run as root.\n"):
+        taken.update(dates=["2026-10-11-093012", "2026-10-12-010203"], refuse=root_only)
+        time_machine(cleaner.list_snapshots)
+        taken["dates"].append("2026-10-12-113000")      # made since the page was shown them: it stays, here too
+        said, calls = time_machine(cleaner.remove_snapshots)
+        assert said["ok"] and said["text"].startswith("Removed 2 snapshots.") and calls[3] == listing_call and calls[5:] == [listing_call], calls
+        assert taken["dates"] == ["2026-10-12-113000"]
+        assert calls[4] == ["/usr/bin/osascript", "-e", 'do shell script "/usr/bin/tmutil deletelocalsnapshots 2026-10-11-093012; '
+                            '/usr/bin/tmutil deletelocalsnapshots 2026-10-12-010203" with administrator privileges'], calls[4]
+    # Cancelled at the password, or refused for another reason: said as it is, and nothing is counted as gone.
+    taken.update(dates=["2026-10-11-093012", "2026-10-12-010203"], admin=(1, ""))
+    time_machine(cleaner.list_snapshots)
+    lines_before = len(cleaner.history(10 ** 6))
+    assert time_machine(cleaner.remove_snapshots, stderr="execution error: User canceled. (-128)")[0] == {"ok": False, "text": "Cancelled. Nothing changed."}
+    # A snapshot that is busy, or any other failure that doesn't say root is needed: no password
+    # dialog, and tmutil's own words.
+    for other in ("tmutil: something else went wrong", "Failed to delete local snapshot '2026-10-11-093012'",
+                  "Snapshot in use: com.apple.TimeMachine.2026-10-11-093012.local", "tmutil: you are not root enough"):
+        taken["refuse"] = other + "\n"
+        said, calls = time_machine(cleaner.remove_snapshots)
+        assert said == {"ok": False, "text": f"macOS kept 2 snapshots. {other}."}, said
+        assert not any(call[0] == "/usr/bin/osascript" for call in calls) and len(cleaner.history(10 ** 6)) == lines_before, other
+    taken.update(refuse="", admin=(0, ""))
+    cleaner.SNAPSHOTS[:] = []
+
     # --- a path is offered once: no row holds another row's path, or anything inside one --------------
     spot["hits"] = [trained, fresh_weights, hf_bin, ckpt_bin, keras_h5, package, in_repo, unzipped, packed, tarball, notes_zip] \
         + runs + sets + done_sets + left_out + not_archives
@@ -1759,18 +2299,25 @@ try:
     for name, (_, source_scan) in cleaner.SOURCES.items():
         if name in ("simulators", "homebrew", "docker"):                # their rows are commands, without paths
             continue
-        found = spotlit(source_scan) if name in ("screenshots", "models", "archives") else source_scan()
+        found = spotlit(source_scan) if name in ("screenshots", "models", "archives") else (
+            clouded(source_scan)[:2] if name in ("cloud", "attachments") else source_scan())
         for row in found[0] if isinstance(found, tuple) else found:
             for p in row["paths"]:
                 assert p not in seen, (p, "is in two rows", (name, row["name"]), seen[p])
                 seen[p] = (name, row["name"])
-    assert {"models", "archives", "screenshots", "browser_copies"} <= {name for name, _ in seen.values()}
+    assert {"models", "archives", "screenshots", "browser_copies", "cloud", "attachments"} <= {name for name, _ in seen.values()}
+    assert seen[old_clip][0] == "screenshots" and seen[unzipped][0] == "archives" and seen[trained][0] == "models"
+    assert seen[mail_installer][0] == "installers" and seen[report][0] == "attachments" and seen[on_desktop][0] == "cloud"
     for p in seen:
         above = os.path.dirname(p)
         while len(above) > len(box):
             assert above not in seen, (p, seen[p], "is inside", seen.get(above))
             above = os.path.dirname(above)
     cleaner.dataless, cleaner.go_caches = earlier_dataless, real_go
+    cleaner.CLOUD, cleaner.clock = None, time.time
+    offer_cloud(False)
+    for mine in (on_desktop, os.path.join(desktop, "Setup.dmg"), os.path.join(cleaner.HOME, "Downloads", "big-download.mov"), mail_folder, messages):
+        subprocess.run(["/bin/rm", "-rf", "--", mine], check=True)
 
     # --- what grew: one snapshot of the sizes a day, set against one from about a week ago ----------
     sizes_file = os.path.join(cleaner.state_dir(), "sizes.json")
@@ -1907,6 +2454,10 @@ try:
         beside = put("MacOS", "headroom-size", kb=1, root=os.path.dirname(cleaner.HERE))
         os.chmod(beside, 0o755)
         assert (cleaner.find_sizer() == beside) == found, layout
+        helper = put("MacOS", "headroom-cloud", kb=1, root=os.path.dirname(cleaner.HERE))       # the iCloud helper, the same way
+        assert cleaner.find_helper("headroom-cloud", "HEADROOM_CLOUD") is None, "not a program yet"
+        os.chmod(helper, 0o755)
+        assert (cleaner.find_helper("headroom-cloud", "HEADROOM_CLOUD") == helper) == found, layout
     cleaner.HERE = real_here
     if wanted:
         os.environ["HEADROOM_SIZE"] = wanted
@@ -2045,6 +2596,90 @@ try:
             cleaner.SIZER = None
         os.chmod(os.path.join(tree, "locked"), 0o755)
         shutil.rmtree(tree)
+
+        # The iCloud helper, built the same way and run on a home folder that is not in iCloud. It
+        # must offer nothing there, and refuse every path it is asked to remove the copy of.
+        cloud_tool = os.path.join(box, "built", "headroom-cloud")
+        made = subprocess.run([swiftc, "-O", "-sdk", sdk, "-target", f"{platform.machine()}-apple-macos12", "-o", cloud_tool,
+                               os.path.join(os.path.dirname(os.path.abspath(cleaner.__file__)), "launcher", "cloud.swift")],
+                              capture_output=True, text=True)
+        assert made.returncode == 0, made.stderr
+        plain_home = os.path.join(box, "plain-home")
+        plain_drive = os.path.join(plain_home, "Library", "Mobile Documents", "com~apple~CloudDocs")
+        in_drive = put("Projects", "film.mov", kb=300, root=plain_drive)
+        on_desk = put("Desktop", "clip.mov", kb=300, root=plain_home)
+        linked = os.path.join(plain_drive, "Projects", "link.mov")
+        os.symlink(in_drive, linked)
+        packaged = put("Deck.app", "Contents", "slide.mov", kb=10, root=plain_drive)
+        tucked = put(".Trash", "old.mov", kb=10, root=plain_drive)
+
+        def cloud_tool_says(*arguments, home=plain_home, cwd=None):
+            ran = subprocess.run([cloud_tool, *arguments], capture_output=True, text=True, env={"HOME": home}, cwd=cwd)
+            return ran.returncode, json.loads(ran.stdout) if ran.stdout.strip() else None
+        code, said = cloud_tool_says("list", "0")
+        assert code == 0 and said["drive"] is True and said["roots"] == [plain_drive] and said["files"] == [], said
+        assert said["account"] in (True, False) and said["online"] in (True, False)
+        asked = [in_drive, on_desk, linked, os.path.dirname(in_drive), packaged, tucked, "/etc/hosts", kept_outside,
+                 os.path.join(plain_drive, "gone.mov"), "film.mov", os.path.join(plain_drive, "Projects", "..", "Projects", "film.mov")]
+        before = {p: os.lstat(p) for p in asked if os.path.lexists(p)}
+        for arguments in (["evict", "--"] + asked, ["evict"] + asked):
+            code, answers = cloud_tool_says(*arguments, cwd=os.path.dirname(in_drive))
+            assert code == 0 and [a["path"] for a in answers] == asked and not any(a["ok"] for a in answers), answers
+            assert all(a["whys"] and a["whys"][0] == a["why"] for a in answers), "every reason, the first of them first"
+            if said["online"]:
+                # A file that is not iCloud's fails every rule that can be seen to fail here. Where
+                # macOS gives no answer (is it uploading?), that is a reason to leave it too.
+                assert answers[0]["whys"] == [
+                    "It is not in iCloud Drive.", "The copy on this Mac is not the newest version, or is not here.",
+                    "It has not been uploaded to iCloud yet.", "It is being uploaded, or macOS does not say.",
+                    "It is being downloaded, or macOS does not say.",
+                    "It has a conflict that needs settling first, or macOS does not say.",
+                    "It was changed in the last hour.", "Something about it changed in the last hour."], answers[0]["whys"]
+                assert [a["why"] for a in answers] == [
+                    "It is not in iCloud Drive.", "It is outside iCloud Drive.", "It is not there, or is reached through a link.",
+                    "It is not a plain file.", "It is inside a package, which must stay whole.", "It is hidden, or in a hidden folder.",
+                    "It is not there, or is reached through a link.", "It is outside iCloud Drive.",
+                    "It is not there, or is reached through a link.", "It is not there, or is reached through a link.",
+                    "It is not there, or is reached through a link."], [a["why"] for a in answers]
+            else:
+                assert all(a["why"].startswith("This Mac is offline") for a in answers), answers
+        assert {p: os.lstat(p) for p in before} == before, "nothing was touched"
+        # Contents two hours old: that rule is met, and the other one about the last hour still holds
+        # (a file's attributes can't be dated back, and setting its date is itself a change to them).
+        os.utime(in_drive, (time.time() - 30 * 60,) * 2)
+        assert not said["online"] or "It was changed in the last hour." in cloud_tool_says("evict", "--", in_drive)[1][0]["whys"], "half an hour is inside it"
+        os.utime(in_drive, (time.time() - 2 * 3600,) * 2)
+        whys = cloud_tool_says("evict", "--", in_drive)[1][0]["whys"]
+        assert not said["online"] or ("It was changed in the last hour." not in whys and whys[-1] == "Something about it changed in the last hour."), whys
+        # Without iCloud Drive there is nowhere to look, and nothing can be inside it.
+        bare = os.path.dirname(put("bare-home", "Desktop", "clip.mov", kb=10, root=box))
+        code, said = cloud_tool_says("list", "0", home=os.path.dirname(bare))
+        assert code == 0 and said["drive"] is False and said["roots"] == [] and said["files"] == [], said
+        code, answers = cloud_tool_says("evict", "--", os.path.join(bare, "clip.mov"), home=os.path.dirname(bare))
+        assert [a["ok"] for a in answers] == [False] and os.path.getsize(os.path.join(bare, "clip.mov")) == 10 * 1024
+        for wrong in ([], ["list"], ["list", "x"], ["list", "-1"], ["list", "0", "1"], ["remove", in_drive], ["--help"]):
+            ran = subprocess.run([cloud_tool] + wrong, capture_output=True, text=True, env={"HOME": plain_home})
+            assert ran.returncode == 64 and ran.stdout == "" and ran.stderr.startswith("usage: headroom-cloud"), wrong
+        # Through headroom: the scan finds nothing to offer, and a row made up for a file in there is refused by the helper itself.
+        real_home, cleaner.HOME, cleaner.CLOUD = cleaner.HOME, plain_home, cloud_tool
+        os.environ["HOME"], env_home = plain_home, os.environ.get("HOME")
+        try:
+            assert cleaner.scan_cloud() == ([], "") and cleaner.CLOUD_ROOTS == [], "off in this home: nothing is asked"
+            cleaner.save_state("settings.json", {"cloud": True})
+            cleaner.clock = lambda: time.time() + 2 * 3600      # headroom's own hour is over; the helper still has its own
+            found, notice = cleaner.scan_cloud()
+            assert found == [] and (not said["online"] or notice == ("" if said["account"] else
+                                    "macOS says nobody is signed in to iCloud Drive on this Mac, so there are no local copies to remove.")), notice
+            if said["online"]:
+                assert cleaner.CLOUD_ROOTS == [plain_drive]
+                made_up = cleaner.item("cloud", "Projects / film.mov", [in_drive], 300)
+                made_up["evict"], made_up["seen"] = True, {in_drive: 0o100000}
+                out = cleaner.delete(made_up)
+                assert out["errors"] == ["It is not in iCloud Drive."] and out["freed_kb"] == 0 and os.path.getsize(in_drive) == 300 * 1024, out
+        finally:
+            cleaner.HOME, cleaner.CLOUD, cleaner.clock = real_home, None, time.time
+            os.environ["HOME"] = env_home
+            cleaner.CLOUD_ROOTS[:] = []
 
     # --- the port the app's launcher keeps for headroom is tried first ---------------------------------
     port_file = os.path.join(cleaner.state_dir(), "port")
@@ -2390,7 +3025,7 @@ try:
     assert call("/api/settings")[1]["alert_gb"] == 20
     with recording(Recorder()) as recorder:
         assert call("/api/settings", body={"alert": False, "alert_gb": 15})[1] == {
-            "alert": False, "weekly": True, "alert_gb": 15, "trash": False, "available": True}
+            "alert": False, "weekly": True, "alert_gb": 15, "trash": False, "cloud": False, "available": True}
         assert call("/api/settings", body={"alert_gb": 99999})[1]["alert_gb"] == 15, "a silly number is ignored"
     assert recorder.calls and all(c[0] == "/bin/launchctl" for c in recorder.calls)
     space = call("/api/space")[1]
@@ -2400,6 +3035,7 @@ try:
     sources = {s["id"]: s for s in call("/api/start")[1]["sources"]}
     assert {name: s["slow"] for name, s in sources.items() if s["slow"]} == {
         "homebrew": "Homebrew", "docker": "Docker", "simulators": "the simulators"}, sources
+    assert "cloud" not in sources and call("/api/start")[1]["cloud"] is False, "iCloud Drive is not a place looked at until its switch is on"
     assert {"screenshots", "models", "archives", "browser_copies"} <= set(sources) and sources["builds"]["groups"] == ["builds", "dev"]
 
     # Move to Trash over the API: a setting, read once when a delete starts. Finder moves the row, rm never runs.
@@ -2442,7 +3078,7 @@ try:
         # While a delete runs, where things go can't be changed under it.
         cleaner.JOB["running"] = True
         assert call("/api/settings", body={"trash": False, "alert_gb": 25})[1] == {
-            "alert": False, "weekly": True, "alert_gb": 25, "trash": True, "available": True}
+            "alert": False, "weekly": True, "alert_gb": 25, "trash": True, "cloud": False, "available": True}
         cleaner.JOB["running"] = False
         assert call("/api/settings", body={"trash": False, "alert_gb": 15})[1]["trash"] is False
     assert [c for c in recorder.calls if c[0] == "/usr/bin/osascript"] == [finder + [on_cache]]
@@ -2511,6 +3147,67 @@ try:
     assert newest["what"] == "3 archives in sets" and newest["result"] == "trashed" and newest["paths"] == [cleaner.tilde(p) for p in sets[:3]], newest
     cleaner.go_caches = real_go
     cleaner.FOUND.pop("archives", None)
+
+    # Local copies of iCloud files over the API: ids only, each bundle says why some of its rows
+    # are left out, and the copy goes the same way with the Move to Trash switch on.
+    cleaner.CLOUD, cleaner.clock = "/fake/headroom-cloud", lambda: time.time() + 2 * 3600
+    cleaner.dataless = lambda info: info.st_ino in placeholders
+    icloud.update(files=[film, talk, just_used, solo, cloud_only, kept_outside], roots=[drive])
+    with recording(Recorder(never=("/bin/rm",), **cloud_fakes)) as recorder:
+        # Off: asked for by name all the same, the source lists nothing and the helper is not started.
+        assert call("/api/scan?source=cloud")[1]["items"] == [] and not [c for c in recorder.calls if c[0] == cleaner.CLOUD]
+        assert call("/api/settings", body={"cloud": True})[1]["cloud"] is True
+        started = call("/api/start")[1]
+        assert started["cloud"] is True and {"id": "cloud", "groups": ["cloud"], "slow": "iCloud Drive"} in started["sources"]
+        listed = call("/api/scan?source=cloud")[1]
+        local = {r["name"]: r for r in listed["items"]}
+        assert sorted(local) == ["Projects / draft.mov", "Projects / film.mov", "Projects / talk.key", "Solo / one.psd"], sorted(local)
+        assert all(r["evict"] and not r["trash"] and not r["safe"] and not r["blocked"] and "paths" not in r for r in local.values())
+        assert cleaner.HOME not in json.dumps(listed) and listed["notice"] == ""
+        assert listed["bundles"][local["Projects / film.mov"]["bundle"]] == {
+            "noun": "files in Projects", "detail": "iCloud Drive/Projects", "min": 1,
+            "note": "They stay in iCloud and download again when you open them.", "left": "opened or changed in the last 30 days"}
+        assert call("/api/settings", body={"trash": True})[1]["trash"] is True
+        assert call("/api/blocked")[1][local["Projects / film.mov"]["id"]] == "", "the switch does not grey these out"
+        assert call("/api/delete", body={"ids": [local["Projects / film.mov"]["id"], local["Projects / talk.key"]["id"]]})[0] == 200
+        progress = wait_for_job()
+        assert call("/api/settings", body={"trash": False})[1]["trash"] is False
+    assert [c for c in recorder.calls if c[0] == cleaner.CLOUD][-1] == [cleaner.CLOUD, "evict", "--", film, talk], recorder.calls
+    assert not [c for c in recorder.calls if c[0] == "/usr/bin/osascript"], "nothing went to Finder"
+    assert progress["trash"] is True and all(r["evicted"] and not r["trashed"] and not r["errors"] for r in progress["results"])
+    newest = call("/api/history")[1]["items"][0]
+    assert (newest["what"], newest["result"], newest["section"]) == ("2 files in Projects", "evicted", "cloud"), newest
+    assert os.path.isfile(film) and os.path.isfile(talk), "the files are still there"
+    # Switched off again: the rows of the last scan are not this launch's any more, so a delete by
+    # their ids is turned away, and a row that is still in hand is refused at the last step too.
+    kept_row = cleaner.FOUND["cloud"][local["Solo / one.psd"]["id"]]
+    with recording(Recorder(never=("/bin/rm",), **cloud_fakes)) as recorder:
+        assert call("/api/settings", body={"cloud": False})[1]["cloud"] is False
+        assert "cloud" not in cleaner.FOUND and cleaner.CLOUD_ROOTS == []
+        assert call("/api/delete", body={"ids": [local["Solo / one.psd"]["id"]]})[0] == 404
+        cleaner.FOUND["cloud"] = {kept_row["id"]: kept_row}         # as if the switch went off behind the server's back
+        cleaner.CLOUD_ROOTS[:] = [drive]
+        assert call("/api/delete", body={"ids": [kept_row["id"]]})[0] == 200
+        progress = wait_for_job()
+    assert not [c for c in recorder.calls if c[0] == cleaner.CLOUD], "the helper is never started with the switch off"
+    assert progress["results"][0]["errors"] == ["Left alone: local copies of iCloud Drive files are switched off under Maintenance."]
+    assert os.path.getsize(solo) == 100 * 1024 and "cloud" not in {s["id"] for s in call("/api/start")[1]["sources"]}
+    cleaner.CLOUD, cleaner.dataless, cleaner.clock = None, earlier_dataless, time.time
+    cleaner.FOUND.pop("cloud", None)
+    cleaner.CLOUD_ROOTS[:] = []
+
+    # Time Machine's local snapshots over the API. The page cannot name one: whatever it sends,
+    # the snapshots it was last shown are the ones that go.
+    taken.update(dates=["2026-10-11-093012", "2026-10-12-010203"], extra=[], code=0, refuse="", admin=(0, ""))
+    with recording(Recorder(answer=tm_says, fakes=["/usr/bin/tmutil"], never=("/bin/rm",))) as recorder:
+        assert call("/api/snapshots", cookie=None)[0] in (401, 403) and call("/api/snapshots", body={}, cookie=None)[0] in (401, 403)
+        assert recorder.calls == [], "not signed in: nothing is even listed"
+        assert call("/api/snapshots")[1] == {"count": 2, "oldest": oldest, "error": ""}
+        taken["dates"].append("2026-10-12-120000")
+        said = call("/api/snapshots", body={"id": "2026-10-12-120000", "dates": ["2026-10-12-120000"], "date": "2020-01-01-000000"})[1]
+    assert said == {"ok": True, "text": "Removed 2 snapshots. Free space can take a while to go up."}, said
+    assert [c[2] for c in recorder.calls if c[1] == "deletelocalsnapshots"] == ["2026-10-11-093012", "2026-10-12-010203"]
+    assert taken["dates"] == ["2026-10-12-120000"] and call("/api/history")[1]["items"][0]["what"] == "2 Time Machine local snapshots"
 
     # One scan of a source at a time: a second request while the first is running waits for it and
     # gets the same answer, so "Scan again" never starts a slow source's programs twice over.

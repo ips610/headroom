@@ -728,13 +728,14 @@
     <div class="wrap">
       <div class="list-head">
         <h2 class="display">What <span>went.</span></h2>
-        <p>Everything headroom deleted, moved to the Trash or packed, newest first.</p>
+        <p>Everything headroom deleted, moved to the Trash or packed, and the iCloud files it removed the local copy of. Newest first.</p>
       </div>
       <section class="chart" aria-labelledby="space-title">
         <h3 class="mono" id="space-title">Free space over time</h3>
         <div class="chart-box" id="space-chart" tabindex="0" aria-label="Free space over time. Use the arrow keys to read each point."></div>
         <details id="space-details"><summary>As a table</summary><table id="space-table"></table></details>
       </section>
+      <p class="quiet">Free space can take a while to go up: macOS counts snapshots and purgeable files as used until it clears them.</p>
       <h3 class="mono sub-head" id="grew-title">What grew</h3>
       <ul class="plain" id="grew-list"></ul>
       <div class="tool-bar"><span class="mono status" id="h-status"></span></div>
@@ -816,11 +817,15 @@ const GROUPS = [
     blurb: 'Zip, tar, 7z and rar files of 20 MB or more. The ones with a folder of the same name next to them come first: they look unzipped already. All of them go to the Trash.' },
   { id: 'shots', title: 'Screenshots and screen recordings', caution: true, meter: 'more',
     blurb: 'Screenshots and screen recordings macOS saved, a row for each month. They are your own files, so they go to the Trash. Ones from the last 30 days stay unticked when you tick the whole section.' },
+  { id: 'mail', title: 'Mail and Messages attachments', caution: true, meter: 'more',
+    blurb: 'Copies Mail made of attachments you opened: the messages keep the originals. And files of 20 MB or more in your Messages conversations: removing one leaves a blank spot in that conversation in Messages on this Mac, so ticking the whole section never picks those. All of them go to the Trash.' },
+  { id: 'cloud', title: 'Local copies of iCloud Drive files', caution: true, meter: 'more', tag: 'NOTHING IS DELETED',
+    blurb: 'Files of 10 MB or more that are in iCloud Drive and also take up room on this Mac. Only the copy on this Mac goes: the file stays in iCloud and downloads again when you open it. Files changed in the last hour are left out. Ones opened or changed in the last 30 days stay unticked when you tick the whole section.' },
 ];
 const KNOWN = new Set(GROUPS.map(g => g.id));
 const CAUTION = new Set(GROUPS.filter(g => g.caution).map(g => g.id));
 const NUM = Object.fromEntries(GROUPS.map((g, i) => [g.id, String(i + 1).padStart(2, '0')]));
-const SHORT = { trash: 'Trash & browsers', apps: 'App caches', temp: 'Logs & temp', installers: 'Installers', dev: 'Dev tools', builds: 'Build folders', leftovers: 'App leftovers', big: 'Backups & big downloads', more: 'Models, archives & screenshots' };
+const SHORT = { trash: 'Trash & browsers', apps: 'App caches', temp: 'Logs & temp', installers: 'Installers', dev: 'Dev tools', builds: 'Build folders', leftovers: 'App leftovers', big: 'Backups & big downloads', more: 'Your own files' };
 const SHOWN = 8;          // rows a section shows before "Show N more"
 const POLL_MS = 400;
 const RUN = document.querySelector('meta[name="headroom-run"]').content;
@@ -857,7 +862,9 @@ const S = {
   batch: null,            // finished jobs of this run: {kb, count, results, stopped}
   justFreed: null,
   justMoved: false,       // what the last run cleared went to the Trash
+  justNone: 'Nothing was freed',     // what the result says when no size can be given
   toTrash: false,         // Maintenance's switch: cleaned files go to the Trash, not straight off
+  cloud: false,           // Maintenance's other switch: local copies of iCloud Drive files are offered at all
   jobTrash: false,        // the same, for the delete that is running
   queueTrash: false,      // a question about queued picks promised the Trash: the next job keeps that
   growth: null,           // {span, sections, top}: what grew since about a week ago
@@ -937,7 +944,7 @@ const allRows = () => [...S.rows.values()];
 const weight = row => row.kb || row.weighs || 0;
 const bySize = (a, b) => (b.rank || 0) - (a.rank || 0) || weight(b) - weight(a) || String(a.name).localeCompare(String(b.name));
 const rowsIn = group => allRows().filter(row => row.group === group).sort(bySize);
-const YOURS = new Set(['models', 'archives', 'shots']);     // your own files: each row can be shown in Finder
+const YOURS = new Set(['models', 'archives', 'shots', 'mail', 'cloud']);     // your own files: each row can be shown in Finder
 const PAGE = 200;         // rows a bundle adds at a time once it is open
 
 // The bundles the page folds into one line each: key -> its rows. Rows that belong together but
@@ -980,9 +987,14 @@ const scanningNow = () => S.starting || S.sources.some(source => S.pending.has(s
 const slowPending = group => S.sources.filter(source => source.slow && S.pending.has(source.id)
   && (!group || (source.groups || []).includes(group))).map(source => source.slow);
 const listed = names => names.length < 2 ? names.join('') : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
-// How a row goes: its own command runs (git gc), it moves to the Trash, or it is deleted.
-const moves = row => Boolean(row.trash || (S.deleting ? S.jobTrash : S.toTrash));
-const doing = row => row.action ? 'Running' : moves(row) ? 'Moving' : 'Deleting';
+// How a row goes: its own command runs (git gc), only its copy on this Mac goes (an iCloud Drive
+// file, whatever the Move to Trash switch says), it moves to the Trash, or it is deleted.
+const moves = row => !row.evict && Boolean(row.trash || (S.deleting ? S.jobTrash : S.toTrash));
+const doing = row => row.action ? 'Running' : row.evict ? 'Removing' : moves(row) ? 'Moving' : 'Deleting';
+const copies = n => n === 1 ? 'local copy' : 'local copies';
+// What the warnings count: not a cache, and gone for good or to the Trash. An iCloud file stays in iCloud.
+const risky = row => CAUTION.has(row.group) && !row.evict;
+const STAYS = 'Nothing is deleted.';
 const BACK = 'The space comes back when you empty the Trash.';
 const GC_KEEPS = 'Commits you can reach stay; git may remove unreachable ones older than its grace period.';
 
@@ -1141,6 +1153,7 @@ function renderHero() {
     label = 'Can be cleared';
     const working = allRows().filter(row => row.status && row.status !== 'next');
     lede = working.length && working.every(row => row.action) ? 'Running git gc on what you picked. You can keep picking.'
+      : working.length && working.every(row => row.evict) ? `Removing the local copies you picked. ${STAYS} You can keep picking.`
       : S.jobTrash ? `Moving what you picked to the Trash. ${BACK} You can keep picking.`
       : 'Deleting what you picked. Free space grows as it goes, and you can keep picking.';
   } else if (stale) {
@@ -1250,7 +1263,7 @@ function buildShells() {
       el('span', { class: 'mono sec-num', text: NUM[id] }),
       el('span', { class: 'sec-main' },
         el('span', { class: 'sec-title' }, el('i', { class: 'sw', 'data-g': group.meter || id, 'aria-hidden': 'true' }), group.title,
-          group.caution && el('span', { class: 'tag', text: 'NOT CACHES' })),
+          group.caution && el('span', { class: 'tag', text: group.tag || 'NOT CACHES' })),
         el('span', { class: 'sec-blurb', text: group.blurb }),
         sel),
       el('span', { class: 'sec-side' }, sizeSlot, grew),
@@ -1329,8 +1342,8 @@ function rowNode(row, inside) {
   }
   const slot = el('span', { class: 'row-size' });
   if (row.status === 'deleting') slot.append(spinner(), doing(row));
-  else if (row.status === 'done') slot.append(icon('check'), (row.moved ? 'Moved ' : 'Freed ') + size(row.freed || 0));
-  else if (row.status === 'failed') slot.append(row.action ? 'Not done' : moves(row) ? 'Not moved' : STATUS_TEXT.failed);
+  else if (row.status === 'done') slot.append(icon('check'), row.asked ? 'Asked macOS' : row.unmeasured ? 'Done' : (row.moved ? 'Moved ' : 'Freed ') + size(row.freed || 0));
+  else if (row.status === 'failed') slot.append(row.action ? 'Not done' : row.evict ? 'Not removed' : moves(row) ? 'Not moved' : STATUS_TEXT.failed);
   else if (STATUS_TEXT[row.status]) slot.append(STATUS_TEXT[row.status]);
   else slot.append(row.action || size(row.kb));       // a row that runs a command says which: what it saves isn't known
   const keepable = !row.stale && !row.status && !S.deleting;
@@ -1376,7 +1389,7 @@ function bundleNode({ key, meta, rows }) {
   const leftOut = rows.filter(row => row.recent).length;
   const words = [];
   if (leftOut && !(leftOut === rows.length && /leaves them out/.test(meta.note))) {
-    words.push(`${leftOut === rows.length ? 'All of them are' : leftOut === 1 ? '1 of them is' : leftOut + ' of them are'} left out when you tick the whole section: added or changed in the last 30 days, or inside a git project.`);
+    words.push(`${leftOut === rows.length ? 'All of them are' : leftOut === 1 ? '1 of them is' : leftOut + ' of them are'} left out when you tick the whole section: ${meta.left || 'added or changed in the last 30 days, or inside a git project'}.`);
   }
   if (meta.note) words.push(meta.note);
   if (words.length && !stale) note('info', words.join(' '));
@@ -1443,6 +1456,7 @@ function updateGroup(group) {
     ? `${ticked.length === usable.length && usable.length > 1 ? 'All ' + usable.length : ticked.length + ' of ' + usable.length} picked · ${size(sumKb(ticked))}`
     : '';
 
+  shell.sec.hidden = group.id === 'cloud' && !S.cloud;      // not there at all until its switch is on
   shell.sec.classList.toggle('open', open);
   shell.sec.classList.toggle('empty', !mine.length && !measuring);
   shell.toggle.setAttribute('aria-expanded', String(open));
@@ -1531,7 +1545,8 @@ function renderDock() {
     const canAdd = chosen.length > 0 && !S.stopping && !S.attached;
     $('add-row').hidden = !canAdd && !queued;
     $('add').hidden = !canAdd;
-    $('add').textContent = chosen.length && chosen.every(moves) ? 'Move these too' : 'Delete these too';
+    $('add').textContent = chosen.length && chosen.every(row => row.evict) ? 'Remove these too'
+      : chosen.length && chosen.every(moves) ? 'Move these too' : 'Delete these too';
     $('add-text').textContent = [
       canAdd ? `${items(chosen.length)} picked · ${size(total)}` : '',
       queued ? `${items(queued)} queued next` : '',
@@ -1542,13 +1557,13 @@ function renderDock() {
   let main, sub, warn = false;
   if (chosen.length) {
     main = `${items(chosen.length)} picked`;
-    const risky = chosen.filter(row => CAUTION.has(row.group)).length;
-    if (risky) {
-      sub = risky === 1 ? '1 is not a cache' : `${risky} are not caches`;
+    const unsafe = chosen.filter(risky).length;
+    if (unsafe) {
+      sub = unsafe === 1 ? '1 is not a cache' : `${unsafe} are not caches`;
       warn = true;
-    } else sub = 'You confirm before anything goes';
+    } else sub = chosen.every(row => row.evict) ? 'Nothing is deleted · they stay in iCloud' : 'You confirm before anything goes';
   } else if (S.justFreed !== null) {
-    main = S.justFreed ? `${S.justMoved ? 'Moved' : 'Freed'} ${size(S.justFreed)}` : S.jobTrash ? 'Nothing was moved' : 'Nothing was freed';
+    main = S.justFreed ? `${S.justMoved ? 'Moved' : 'Freed'} ${size(S.justFreed)}` : S.justNone;
     sub = 'Pick more, or scan again later';
   } else if (scanning) {
     main = 'Measuring…';
@@ -1565,8 +1580,11 @@ function renderDock() {
   $('sum-sub').className = 'mono' + (warn ? ' warn' : '');
   const del = $('del');
   del.disabled = !chosen.length;
-  const toTrash = chosen.length ? chosen.every(moves) : S.toTrash;
+  // An iCloud file among them changes nothing about how the others go: the button says that.
+  const others = chosen.filter(row => !row.evict);
+  const toTrash = others.length ? others.every(moves) : S.toTrash;
   if (chosen.length && chosen.every(row => row.action)) del.textContent = 'Run git gc';
+  else if (chosen.length && !others.length) del.textContent = `Remove ${copies(chosen.length)} · ${size(total)}`;
   else if (toTrash) del.textContent = chosen.length ? 'Move to Trash · ' + size(total) : 'Move to Trash';
   else del.textContent = chosen.length ? 'Delete ' + size(total) : 'Delete';
   $('rescan').disabled = S.starting || S.pending.size > 0;     // one scan at a time, the slow sources included
@@ -1607,6 +1625,7 @@ async function scan(start) {
   S.starting = false;
   S.sources = start.sources || [];
   S.toTrash = Boolean(start.trash);
+  S.cloud = Boolean(start.cloud);
   setDisk(start.disk);
   // The last scan's numbers show at once, greyed out, until this scan confirms each source.
   S.lastAt = 0;
@@ -1766,13 +1785,13 @@ function askDelete(safe) {
   const told = new Set();
   for (const row of chosen) {
     const members = folds.get(row.bundle);
-    if (!members) lines.push([row.name, row.kb, row.action || (moves(row) ? 'Trash · ' + size(row.kb) : '')]);
+    if (!members) lines.push([row.name, row.kb, row.action || (row.evict ? 'Local copy · ' + size(row.kb) : moves(row) ? 'Trash · ' + size(row.kb) : '')]);
     else if (!told.has(row.bundle)) {
       told.add(row.bundle);
       const picked = chosen.filter(one => one.bundle === row.bundle);
       const kb = sumKb(picked);
       lines.push([(picked.length < members.length ? picked.length + ' of ' : '') + named(members.length, S.bundles[row.bundle]), kb,
-        moves(row) ? 'Trash · ' + size(kb) : '']);
+        row.evict ? `${picked.length === 1 ? 'Local copy' : 'Local copies'} · ${size(kb)}` : moves(row) ? 'Trash · ' + size(kb) : '']);
     }
   }
   const amount = size(sumKb(chosen));
@@ -1789,10 +1808,20 @@ function askDelete(safe) {
     }, go);
   }
   const runs = chosen.filter(row => row.action).length;
-  const rest = n - runs;
+  // iCloud files only lose their copy on this Mac. They are not among the items deleted or moved.
+  const local = chosen.filter(row => row.evict).length;
+  const stay = `${local === 1 ? 'The file stays in iCloud and downloads again when you open it' : 'The files stay in iCloud and download again when you open them'}, which needs this Mac to be online.`;
+  if (local === n) {
+    return ask({
+      title: `Remove the ${copies(n)} of ${n === 1 ? '1 file' : n + ' files'}?`,
+      text: `${S.deleting ? `${n === 1 ? 'It goes' : 'They go'} when the run in progress finishes. ` : ''}${STAYS} ${stay}`,
+      lines, yes: `Remove ${copies(n)} · ${amount}`, style: 'btn-ink',
+    }, go);
+  }
+  const rest = n - runs - local;
   const toTrash = chosen.filter(row => !row.action && moves(row)).length;
   const backups = chosen.filter(row => row.trash && row.group === 'big').length;
-  const risky = chosen.filter(row => CAUTION.has(row.group)).length;
+  const unsafe = chosen.filter(risky).length;
   const all = rest > 0 && toTrash === rest;        // everything that isn't git gc goes to the Trash
   const histories = runs === 1 ? '1 git history' : runs + ' git histories';
   const things = rest === 1 ? '1 item' : rest + ' items';
@@ -1803,11 +1832,15 @@ function askDelete(safe) {
     : `${rest === 1 ? 'It goes' : 'They go'} straight off this Mac, not to the Trash.`;
   const text = [S.deleting ? `${n === 1 ? 'It goes' : 'They go'} when the run in progress finishes. ${where}` : where];
   if (backups === n) text.push(' A backup may be your only copy of that device if it isn’t in iCloud.');
-  else if (risky) {
-    const which = risky === n ? (n === 1 ? 'It isn’t a cache' : 'None of them are caches')
-      : `${risky} of them ${risky === 1 ? 'isn’t a cache' : 'aren’t caches'}`;
-    text.push(' ', el('strong', { text: `${which}, so ${risky === 1 ? 'it won’t' : 'they won’t'} come back on ${risky === 1 ? 'its' : 'their'} own.` }));
+  else if (unsafe) {
+    const which = unsafe === n ? (n === 1 ? 'It isn’t a cache' : 'None of them are caches')
+      : `${unsafe} of them ${unsafe === 1 ? 'isn’t a cache' : 'aren’t caches'}`;
+    text.push(' ', el('strong', { text: `${which}, so ${unsafe === 1 ? 'it won’t' : 'they won’t'} come back on ${unsafe === 1 ? 'its' : 'their'} own.` }));
   }
+  if (chosen.some(row => String(row.bundle).startsWith('messages:'))) {
+    text.push(' ', el('strong', { text: 'Removing a Messages attachment leaves a blank spot in that conversation in Messages on this Mac.' }));
+  }
+  if (local) text.push(` ${local === 1 ? 'The iCloud Drive file only loses its copy' : `The ${local} iCloud Drive files only lose their copies`} on this Mac. ${stay}`);
   const verb = all ? `Move ${things} to the Trash` : S.deleting ? `Also delete ${rest === 1 ? 'this' : rest + ' more'}` : `Delete ${things}`;
   ask({
     title: !rest ? `Pack ${runs === 1 ? 'this git history' : histories}?`
@@ -1935,7 +1968,8 @@ function applyProgress(progress) {
     if (!row) continue;
     const errors = result.errors || [];
     if (errors.length && result.freed_kb < 1024) Object.assign(row, { status: 'failed', note: errors[0], noteKind: 'bad' });
-    else Object.assign(row, { status: 'done', freed: result.freed_kb, moved: Boolean(result.trashed),
+    else Object.assign(row, { status: 'done', freed: result.freed_kb, moved: Boolean(result.trashed), evicted: Boolean(result.evicted),
+      asked: Boolean(result.asked), unmeasured: Boolean(result.unmeasured),
       note: errors[0] || result.note || '', noteKind: errors.length ? 'warn' : 'info' });
     changed = true;
   }
@@ -2034,6 +2068,9 @@ async function startQueued() {
 function wrapUp(trouble) {
   const { results, count } = S.batch;
   let freed = 0, moved = 0, movedCount = 0, undone = 0;
+  // Local copies of iCloud files: freed like anything else, and said apart, since nothing was deleted.
+  // `asked`: macOS agreed and no room has come back yet. `unmeasured`: it went, and headroom could not measure what that freed.
+  const local = { kb: 0, count: 0, asked: 0, unmeasured: 0, only: results.length > 0 && results.every(result => result.evicted || result.asked) };
   const problems = [], said = [];
   const folds = folded();
   const together = new Map();       // a folded bundle -> [how many of its rows had trouble, the first reason]
@@ -2047,6 +2084,9 @@ function wrapUp(trouble) {
   for (const result of results) {
     if (result.trashed) { moved += result.freed_kb || 0; movedCount += result.freed_kb ? 1 : 0; }
     else freed += result.freed_kb || 0;
+    if (result.evicted && result.freed_kb) { local.kb += result.freed_kb; local.count++; }
+    if (result.asked) local.asked++;
+    else if (result.unmeasured) local.unmeasured++;
     const errors = result.errors || [];
     if (result.note && !errors.length) said.push([result.name, result.note]);
     const row = S.rows.get(result.id);
@@ -2068,11 +2108,12 @@ function wrapUp(trouble) {
   const attached = S.attached;
   // The pill says what the card's headline says: what was freed, or failing that what was moved.
   Object.assign(S, { deleting: false, attached: false, stopping: false, currentId: null, queue: [], queueTrash: false,
-    justFreed: freed || moved, justMoved: moved > 0 && !freed });
+    justFreed: freed || moved, justMoved: moved > 0 && !freed, jobTrash: S.jobTrash && !local.only });
+  S.justNone = noneFreed(local);      // after jobTrash: the pill says what the card's headline says
   document.title = 'headroom';
   render();
   if (RM.data) renderReminders();
-  showResult(freed, moved, results.length - undone, problems, notReached, trouble, said, movedCount, undone);
+  showResult(freed, moved, results.length - undone, problems, notReached, trouble, said, movedCount, undone, local);
   loadGrowth();
   refreshBlocked();
   if (attached) {
@@ -2081,18 +2122,27 @@ function wrapUp(trouble) {
   }
 }
 
-function showResult(freed, moved, done, problems, notReached, trouble, said, movedCount, notDone) {
+// The headline when no size can be given: macOS agreed and has freed nothing yet, it went but could not be measured, or nothing went.
+const noneFreed = local => local.asked ? 'Nothing freed yet' : local.unmeasured ? 'Done, not measured' : S.jobTrash ? 'Nothing was moved' : 'Nothing was freed';
+const SLOW_SPACE = 'Free space can take a while to go up: macOS counts snapshots and purgeable files as used until it clears them.';
+
+function showResult(freed, moved, done, problems, notReached, trouble, said, movedCount, notDone, local = { kb: 0, count: 0, asked: 0, unmeasured: 0, only: false }) {
   const lines = [];
+  // A yes from macOS that has freed nothing yet: said as what it is, without a size.
+  if (local.asked) lines.push(`Asked macOS to remove the ${copies(local.asked)} of ${local.asked === 1 ? '1 file' : local.asked + ' files'}. The space comes back when it has.`);
+  if (local.unmeasured) lines.push(`${local.unmeasured === 1 ? '1 item' : local.unmeasured + ' items'} went, but headroom could not measure what that freed.`);
+  if (local.count) lines.push(`Removed the ${copies(local.count)} of ${local.count === 1 ? '1 file' : local.count + ' files'} · ${size(local.kb)}. ${local.count === 1 ? 'It is' : 'They are'} still in iCloud.`);
   if (moved > 0) lines.push(freed > 0 ? `${size(moved)} more went to the Trash. ${BACK}` : `${movedCount === 1 ? 'It is' : 'They are'} in the Trash. ${BACK}`);
   if (S.disk) lines.push(`This Mac ${freed > 0 ? 'now has' : 'has'} ${size(S.disk.free_kb)} free.`);
+  if (freed > 0) lines.push(SLOW_SPACE);
   if (notReached) lines.push(`Stopped early: ${notReached === 1 ? '1 item was' : notReached + ' items were'} left as ${notReached === 1 ? 'it was' : 'they were'}.`);
   if (trouble) lines.push(trouble);
   const title = el('h2', { class: 'display r-title', id: 'r-title' });
   if (freed > 0) title.append('Freed ', el('span', { text: size(freed) }));
   else if (moved > 0) title.append('Moved ', el('span', { text: size(moved) }));
-  else title.append(S.jobTrash ? 'Nothing was moved' : 'Nothing was freed');
+  else title.append(noneFreed(local));
   // "2 not moved" when nothing went at all; "not fully" when some of it did.
-  const undone = (freed > 0 || moved > 0 ? 'not fully ' : 'not ') + (S.jobTrash ? 'moved' : 'deleted');
+  const undone = (freed > 0 || moved > 0 ? 'not fully ' : 'not ') + (local.only ? 'removed' : S.jobTrash ? 'moved' : 'deleted');
   const notes = [];
   if (problems.length) notes.push(el('li', { class: 'mono', text: `${notDone} ${undone}` }),
     ...problems.map(([name, why]) => el('li', {}, el('b', { text: name }), ' · ' + why)));
@@ -2155,7 +2205,7 @@ function show(view) {
   if (view === 'apps' && !A.loaded && !A.loading) loadApps();
   if (view === 'disk' && !D.data && !D.loading) loadDisk('places', '');
   if (view === 'startup') loadStartup();
-  if (view === 'tune') { renderTasks(); loadSettings(); renderUpdate(); }
+  if (view === 'tune') { renderTasks(); loadSettings(); loadSnapshots(); renderUpdate(); }
   if (view === 'history') { loadHistory(); loadSpace(); loadGrowth(); }
   render();
 }
@@ -2404,7 +2454,7 @@ async function runTask(task) {
 const RESULT_TEXT = { deleted: 'Deleted', partly: 'Partly done', failed: 'Not done', trashed: 'Moved to the Trash',
   compacted: 'Packed with git gc', 'turned-off': 'Turned off', 'turned-on': 'Turned on' };
 const SECTION_TEXT = { ...Object.fromEntries(GROUPS.map(g => [g.id, g.title])), uninstall: 'Uninstalled', disk: 'Disk explorer',
-  duplicates: 'Duplicates', startup: 'Startup' };
+  duplicates: 'Duplicates', startup: 'Startup', snapshots: 'Maintenance' };
 
 function when(at) {
   const date = new Date(at);
@@ -2430,13 +2480,17 @@ async function loadHistory() {
   $('h-list').replaceChildren(...entries.map(entry => {
     const paths = Array.isArray(entry.paths) ? entry.paths : [];
     const where = entry.command || (paths.length ? paths[0] + (paths.length > 1 ? ` and ${paths.length - 1} more` : '') : '');
-    const ok = ['deleted', 'trashed', 'compacted'].includes(entry.result);
+    const ok = ['deleted', 'trashed', 'compacted', 'evicted', 'asked'].includes(entry.result);
     const main = el('div', {},
       el('p', { class: 'mono h-when', text: [when(entry.at), SECTION_TEXT[entry.section] || ''].filter(Boolean).join(' · ') }),
       el('p', { class: 'item-name', text: String(entry.what || '') }),
       where && el('span', { class: 'row-detail', text: where }),
       el('span', { class: 'done-note' + (ok ? '' : ' bad') }, icon(ok ? 'check' : 'warn'),
-        el('span', { text: (RESULT_TEXT[entry.result] || String(entry.result || '')) + (entry.error ? ': ' + entry.error : entry.note ? ': ' + entry.note : '') })));
+        el('span', { text: entry.result === 'evicted'
+          ? (paths.length === 1 ? 'Removed the local copy. It is still in iCloud.' : 'Removed the local copies. They are still in iCloud.')
+          : entry.result === 'asked'
+          ? `Asked macOS to remove the ${copies(paths.length)}. The space comes back when it has.`
+          : (RESULT_TEXT[entry.result] || String(entry.result || '')) + (entry.error ? ': ' + entry.error : entry.note ? ': ' + entry.note : '') })));
     return el('li', { class: 'item' }, main, el('div', { class: 'item-side' }, el('span', { class: 'item-size', text: entry.kb ? size(entry.kb) : '' })));
   }));
 }
@@ -2671,7 +2725,14 @@ async function saveSettings(change) {
     render();
     refreshBlocked();
   }
+  // The iCloud section comes or goes with its switch: the list is measured again, with or without it.
+  if (RM.data && S.cloud !== Boolean(RM.data.cloud)) {
+    S.cloud = Boolean(RM.data.cloud);
+    if (!S.deleting) scan();
+  }
 }
+
+const CLOUD_SWITCH = 'Offer local copies of iCloud Drive files';
 
 function renderReminders() {
   const data = RM.data;
@@ -2682,7 +2743,13 @@ function renderReminders() {
       el('p', { text: `Nothing is deleted for good while this is on. ${BACK} Rows that only a command can clear (Homebrew, Docker, Ollama, simulators, git gc) and the Trash itself wait, greyed out, until you switch it off.` })),
     // Not under a delete that is running: where its rows go was settled when it started.
     el('button', { type: 'button', class: 'switch', role: 'switch', key: 'switch:trash', 'aria-checked': String(Boolean(data.trash)),
-      'aria-label': toTrash, disabled: RM.busy || S.deleting, onclick: () => saveSettings({ trash: !data.trash }) })));
+      'aria-label': toTrash, disabled: RM.busy || S.deleting, onclick: () => saveSettings({ trash: !data.trash }) })),
+    el('li', { class: 'task' },
+      el('div', {}, el('h3', {}, CLOUD_SWITCH, el('span', { class: 'tag', text: 'NEW · UNTESTED' })),
+        el('p', { text: 'New, and not tried on a real iCloud Drive yet, so it is off until you turn it on. With it on, the Clean tab lists files of 10 MB or more that are in iCloud Drive and also take up room on this Mac, and can remove the copy on this Mac. Nothing is deleted: the file stays in iCloud and downloads again when you open it. Files changed in the last hour are never offered.' })),
+      el('button', { type: 'button', class: 'switch', role: 'switch', key: 'switch:cloud', 'aria-checked': String(Boolean(data.cloud)),
+        'aria-label': CLOUD_SWITCH, disabled: RM.busy || S.deleting, onclick: () => saveSettings({ cloud: !data.cloud }) })),
+    snapshotLine());
   const off = !data.available || RM.busy;
   const toggle = (key, label) => el('button', { type: 'button', class: 'switch', role: 'switch', key: 'switch:' + key, 'aria-checked': String(data[key]),
     'aria-label': label, disabled: off, onclick: () => saveSettings({ [key]: !data[key] }) });
@@ -2699,6 +2766,58 @@ function renderReminders() {
   ];
   if (!data.available) lines.push(quietLine(icon('info'), 'Reminders work when headroom runs from Applications.'));
   $('reminders').replaceChildren(...lines);
+}
+
+/* ---------- Time Machine's local snapshots (Maintenance tab) ---------- */
+
+// headroom lists them and removes the ones it listed. The page sends no dates.
+const SN = { data: null, busy: false, result: null };
+
+async function loadSnapshots() {
+  try {
+    SN.data = await get('/api/snapshots');
+  } catch (error) {
+    if (error instanceof TypeError) return showGone();
+    SN.data = { count: 0, oldest: 0, error: 'Could not ask Time Machine.' };
+  }
+  if (RM.data) renderReminders();
+}
+
+function snapshotLine() {
+  const data = SN.data;
+  const n = data ? data.count : 0;
+  const head = el('h3', {}, 'Time Machine local snapshots' + (!data || data.error ? '' : n ? ` · ${n} · oldest ${since(data.oldest)}` : ' · none'),
+    el('span', { class: 'tag plain', text: 'MAY ASK FOR YOUR PASSWORD' }));
+  const main = el('div', {}, head,
+    el('p', { text: 'Time Machine keeps hourly copies of this disk on the disk itself for about a day, so you can restore a file without your backup disk. They count as used space. macOS removes them by itself when it needs the room, and it doesn’t say how big they are.' }));
+  const said = SN.result || (data && data.error ? { ok: false, text: data.error } : null);
+  if (said) main.append(el('p', { class: 'done-note' + (said.ok ? '' : ' bad') }, icon(said.ok ? 'check' : 'warn'), el('span', { text: said.text })));
+  return el('li', { class: 'task' }, main, el('button', {
+    type: 'button', class: 'btn btn-ghost sm', key: 'snapshots', disabled: SN.busy || !n,
+    text: SN.busy ? 'Removing…' : 'Remove them', 'aria-label': 'Remove Time Machine local snapshots',
+    onclick: () => ask({
+      title: n === 1 ? 'Remove this local snapshot?' : `Remove ${n} local snapshots?`,
+      text: 'You lose the way to restore files from the last day from this Mac’s own disk. If another disk has a snapshot from the same moment, that one goes too. Backups on your backup disk are untouched, and macOS would remove these itself when it needs the room. macOS may ask for an administrator’s password.',
+      yes: n === 1 ? 'Remove it' : 'Remove them', style: 'btn-danger',
+    }, removeSnapshots),
+  }));
+}
+
+async function removeSnapshots() {
+  SN.busy = true;
+  SN.result = null;
+  renderReminders();
+  try {
+    SN.result = await api('/api/snapshots', {});
+  } catch (error) {
+    SN.busy = false;
+    if (error instanceof TypeError) return error instanceof AppClosed ? null : showGone();
+    SN.result = { ok: false, text: error.message };
+  }
+  SN.busy = false;
+  await loadSnapshots();
+  renderReminders();
+  announce(`Time Machine local snapshots: ${SN.result.text}`);
 }
 
 /* ---------- updates (top bar + Maintenance tab) ---------- */
@@ -2965,6 +3084,7 @@ async function boot() {
     S.starting = false;
     S.sources = start.sources || [];
     S.toTrash = Boolean(start.trash);
+    S.cloud = Boolean(start.cloud);
     setDisk(start.disk);
     watch(true, progress);
   } else {
