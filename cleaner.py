@@ -2387,6 +2387,9 @@ def scan_once(source):
 
 # --- what grew: the sizes each day's scan measured ------------------------------------------------
 
+clock = time.time       # what "now" is for the snapshots; the tests set it, so a made-up day isn't "the future"
+
+
 def day_of(when):
     return time.strftime("%Y-%m-%d", time.localtime(when))
 
@@ -2412,10 +2415,10 @@ def keep_sizes(source, rows, when=None, failed=False):
     A row is kept under what stays the same about it (`same`, else its id). A row the scan could
     not measure (Docker was off, say) is kept without a size, and a source whose scan `failed`
     without any: an unknown must not read as 0 and then as growth a week later."""
-    when = time.time() if when is None else when
+    when = clock() if when is None else when
     day, oldest = day_of(when), day_of(when - SIZES_DAYS * DAY)
     with STATE_LOCK:
-        days = saved_sizes(max(day, day_of(time.time())))
+        days = saved_sizes(max(day, day_of(clock())))
         today = days[day] if isinstance(days.get(day), dict) else {}
         today[source] = None if failed else {
             r["same"] or r["id"]: [r["group"], r["name"], None if r["blocked"] or r.get("partly") else r["kb"]] for r in rows}
@@ -2448,7 +2451,7 @@ def growth(now=None):
     one, and `span` says how many days back that is. With no earlier day there is nothing to
     compare: span is '' and no numbers. A source, or a single row, that could not be measured on
     either day is left out, so it never reads as growth."""
-    days = saved_sizes(day_of(time.time() if now is None else now))
+    days = saved_sizes(day_of(clock() if now is None else now))
     latest = max(days, default="")
     back = {d: (datetime.date.fromisoformat(latest) - datetime.date.fromisoformat(d)).days for d in days if d < latest}
     week = [d for d in back if 5 <= back[d] <= 9]

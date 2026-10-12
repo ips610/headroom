@@ -1648,6 +1648,7 @@ try:
     # --- what grew: one snapshot of the sizes a day, set against one from about a week ago ----------
     sizes_file = os.path.join(cleaner.state_dir(), "sizes.json")
     noon = time.mktime((2026, 10, 12, 12, 0, 0, 0, 0, -1))
+    cleaner.clock = lambda: noon        # else these days are "the future" wherever the real date is earlier
     cleaner.GREW_KB = 1000
     grew = lambda: cleaner.growth(noon)
 
@@ -1750,6 +1751,8 @@ try:
         assert grew()["sections"] == {} and grew()["top"] == [], broken
     forget()
     cleaner.GREW_KB = 100 * 1024
+
+    cleaner.clock = time.time
 
     # --- the folder measurer: its numbers when it is there, du's for whatever it leaves out ----------
     assert cleaner.find_sizer() == (os.path.realpath(os.environ["HEADROOM_SIZE"]) if os.environ.get("HEADROOM_SIZE") else None), \
