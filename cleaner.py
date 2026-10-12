@@ -60,7 +60,7 @@ RUN = secrets.token_hex(8)
 NONCE = secrets.token_urlsafe(16)
 
 # install.py and package.sh read the version from here. A newer release on GitHub shows up in the app.
-VERSION = "1.7"
+VERSION = "1.7.1"
 RELEASES = "https://github.com/ips610/headroom/releases"
 
 APPLICATIONS = "/Applications"
